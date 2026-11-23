@@ -1,0 +1,20 @@
+# Rust checks for the Anchor workspace. Untested until the first push.
+# Anchor build + LiteSVM tests get added in the first feature PR (needs Solana + Anchor in CI).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

@@ -1,0 +1,30 @@
+# Rust / Anchor
+target/
+.anchor/
+**/*.rs.bk
+test-ledger/
+.surfpool/
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+.yarn/
+
+# Secrets and keys — never commit these
+.env
+.env.local
+.env.*.local
+**/id.json
+**/*-keypair.json
+**/*.pem
+**/*.key
+
+# AI tooling — local, per-developer (AGENTS.md / CLAUDE.md stay committed)
+.claude/
+CLAUDE.local.md
+.codegraph/
+
+# OS
+.DS_Store
