@@ -3,6 +3,17 @@
 One entry per working session: goal, what AI did, what you changed by hand and why, what you
 learned. Newest first. Keep real numbers only.
 
+## 2026-11-24 — M0 setup and ledger schema (PR 1)
+- **Goal:** installs, repo, then `packages/ledger`: schema, idempotent posting, first tests.
+- **AI (Claude Code):** installed the Temporal CLI; scaffolded `ledger`, `payout-workflow`, `mock-partner` with
+  pnpm; created the public repo; wrote plan `01-ledger-schema` and, after approval, the ledger in
+  clean-architecture layers (`domain` pure, `application` use cases + ports, `infrastructure` pg adapter and
+  SQL migrations), `tsconfig.base.json` and a `docker compose` Postgres for tests.
+- **Decided (user):** Postgres client = `pg` (ADR 0012 addendum); plain `.sql` migrations; `docker compose` test DB.
+- **Tests:** 16 pass (domain unit tests and integration tests against Postgres 17), covering L2, L3, replay, bigint above 2^53,
+  concurrent same-key posts and concurrent over-commit. oxlint and oxfmt not run yet (not installed).
+- **By hand:** `[YOU: what you reviewed or changed]`
+
 ## 2026-11-23 — OQ-01 discussion: how real payout partners behave
 - **Goal:** ground the mock partner and OQ-01 (which record says money left) in real partner behaviour.
 - **AI (Claude Code):** explained strong API partners (atomic idempotency keys, status endpoint) vs weak

@@ -1,0 +1,16 @@
+# Local Postgres for ledger integration tests. Dev only, throwaway credentials.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: vault
+      POSTGRES_DB: vault_test
+    ports:
+      - "54329:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault -d vault_test"]
+      interval: 2s
+      retries: 20
