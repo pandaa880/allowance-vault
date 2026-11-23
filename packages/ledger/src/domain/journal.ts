@@ -1,16 +1,22 @@
-import { createHash } from "node:crypto";
-import { UnbalancedTransaction } from "./errors.js";
+import { createHash } from 'node:crypto';
+import { UnbalancedTransaction } from './errors.js';
 
 /** Integer base units only: USDC 6 decimals, INR paise. Never a float. */
-export type Currency = "USDC" | "INR";
+export type Currency = 'USDC' | 'INR';
 
 /**
  * `source` is the system counter-account that makes flows balance. `unused` is not an
  * account: it is derived per scope (ADR 0012).
  */
-export type AccountKind = "source" | "authorized" | "reserved" | "released" | "refunded" | "fx_adjustment";
+export type AccountKind =
+  | 'source'
+  | 'authorized'
+  | 'reserved'
+  | 'released'
+  | 'refunded'
+  | 'fx_adjustment';
 
-export type Direction = "debit" | "credit";
+export type Direction = 'debit' | 'credit';
 
 export interface AccountRef {
   /** A period or claim the account belongs to. */
@@ -39,10 +45,12 @@ const sum = (entries: EntryInput[], direction: Direction): bigint =>
 
 /** L2: debits equal credits, at least two entries, every amount positive. */
 export function assertBalanced(entries: EntryInput[]): void {
-  if (entries.length < 2) throw new UnbalancedTransaction("a transaction needs at least two entries");
-  if (entries.some((e) => e.amount <= 0n)) throw new UnbalancedTransaction("amounts must be positive");
-  if (sum(entries, "debit") !== sum(entries, "credit")) {
-    throw new UnbalancedTransaction("debits do not equal credits");
+  if (entries.length < 2)
+    throw new UnbalancedTransaction('a transaction needs at least two entries');
+  if (entries.some((e) => e.amount <= 0n))
+    throw new UnbalancedTransaction('amounts must be positive');
+  if (sum(entries, 'debit') !== sum(entries, 'credit')) {
+    throw new UnbalancedTransaction('debits do not equal credits');
   }
 }
 
@@ -52,9 +60,14 @@ export function requestHash(request: PostingRequest): string {
     kind: request.kind,
     claimId: request.claimId,
     currency: request.currency,
-    entries: request.entries.map((e) => [e.account.scope, e.account.kind, e.direction, e.amount.toString()]),
+    entries: request.entries.map((e) => [
+      e.account.scope,
+      e.account.kind,
+      e.direction,
+      e.amount.toString(),
+    ]),
   });
-  return createHash("sha256").update(canonical).digest("hex");
+  return createHash('sha256').update(canonical).digest('hex');
 }
 
 export interface PeriodSummary {
@@ -74,12 +87,13 @@ export interface Totals {
 
 /** `authorized` is credit-normal (credits minus debits); the other kinds are debit-normal. */
 export function summarize(totals: Partial<Record<AccountKind, Totals>>): PeriodSummary {
-  const debitNet = (kind: AccountKind): bigint => (totals[kind]?.debits ?? 0n) - (totals[kind]?.credits ?? 0n);
-  const authorized = -debitNet("authorized");
-  const reserved = debitNet("reserved");
-  const released = debitNet("released");
-  const refunded = debitNet("refunded");
-  const fxAdjustment = debitNet("fx_adjustment");
+  const debitNet = (kind: AccountKind): bigint =>
+    (totals[kind]?.debits ?? 0n) - (totals[kind]?.credits ?? 0n);
+  const authorized = -debitNet('authorized');
+  const reserved = debitNet('reserved');
+  const released = debitNet('released');
+  const refunded = debitNet('refunded');
+  const fxAdjustment = debitNet('fx_adjustment');
   return {
     authorized,
     reserved,

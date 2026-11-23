@@ -7,5 +7,9 @@
   },
   "scripts": {
     "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.79.0",
+    "oxlint": "^1.94.0"
   }
 }

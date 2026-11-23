@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { IdempotencyConflict, OverCommitted } from "../domain/errors.js";
+import { randomUUID } from 'node:crypto';
+import { IdempotencyConflict, OverCommitted } from '../domain/errors.js';
 import {
   assertBalanced,
   requestHash,
@@ -7,11 +7,11 @@ import {
   type Currency,
   type PeriodSummary,
   type PostingRequest,
-} from "../domain/journal.js";
-import type { LedgerRepository, LedgerTx } from "./ports.js";
+} from '../domain/journal.js';
+import type { LedgerRepository, LedgerTx } from './ports.js';
 
 export interface PostResult {
-  status: "created" | "replayed";
+  status: 'created' | 'replayed';
   txnId: string;
 }
 
@@ -38,9 +38,9 @@ export function createLedger({ repo, newId = randomUUID }: LedgerDeps) {
     const hash = requestHash(request);
     const txnId = newId();
     const claim = await tx.claimIdempotencyKey(request.idempotencyKey, hash, txnId);
-    if (claim.outcome === "exists") {
+    if (claim.outcome === 'exists') {
       if (claim.requestHash !== hash) throw new IdempotencyConflict(request.idempotencyKey);
-      return { status: "replayed", txnId: claim.txnId };
+      return { status: 'replayed', txnId: claim.txnId };
     }
     await tx.insertTransaction({
       id: txnId,
@@ -49,7 +49,7 @@ export function createLedger({ repo, newId = randomUUID }: LedgerDeps) {
       currency: request.currency,
       entries: request.entries,
     });
-    return { status: "created", txnId };
+    return { status: 'created', txnId };
   }
 
   const postTransaction = (request: PostingRequest): Promise<PostResult> =>
@@ -59,12 +59,16 @@ export function createLedger({ repo, newId = randomUUID }: LedgerDeps) {
   const fundAllowance = (cmd: FundAllowance): Promise<PostResult> =>
     postTransaction({
       idempotencyKey: cmd.idempotencyKey,
-      kind: "fund",
+      kind: 'fund',
       claimId: null,
       currency: cmd.currency,
       entries: [
-        { account: { scope: cmd.scope, kind: "source" }, direction: "debit", amount: cmd.amount },
-        { account: { scope: cmd.scope, kind: "authorized" }, direction: "credit", amount: cmd.amount },
+        { account: { scope: cmd.scope, kind: 'source' }, direction: 'debit', amount: cmd.amount },
+        {
+          account: { scope: cmd.scope, kind: 'authorized' },
+          direction: 'credit',
+          amount: cmd.amount,
+        },
       ],
     });
 
@@ -74,18 +78,26 @@ export function createLedger({ repo, newId = randomUUID }: LedgerDeps) {
       await tx.lockScope(cmd.scope);
       const result = await post(tx, {
         idempotencyKey: cmd.idempotencyKey,
-        kind: "reserve",
+        kind: 'reserve',
         claimId: cmd.claimId,
         currency: cmd.currency,
         entries: [
-          { account: { scope: cmd.scope, kind: "reserved" }, direction: "debit", amount: cmd.amount },
-          { account: { scope: cmd.scope, kind: "source" }, direction: "credit", amount: cmd.amount },
+          {
+            account: { scope: cmd.scope, kind: 'reserved' },
+            direction: 'debit',
+            amount: cmd.amount,
+          },
+          {
+            account: { scope: cmd.scope, kind: 'source' },
+            direction: 'credit',
+            amount: cmd.amount,
+          },
         ],
       });
       // `post` already wrote the entries, so `unused` below is the value after this reserve.
       // A negative result throws, which rolls the whole unit of work back (nothing is written).
       const { unused } = summarize(await tx.scopeTotals(cmd.scope));
-      if (result.status === "created" && unused < 0n) {
+      if (result.status === 'created' && unused < 0n) {
         throw new OverCommitted(cmd.scope, unused + cmd.amount, cmd.amount);
       }
       return result;

@@ -1,4 +1,4 @@
-import type { AccountKind, Currency, EntryInput, Totals } from "../domain/journal.js";
+import type { AccountKind, Currency, EntryInput, Totals } from '../domain/journal.js';
 
 export interface NewTransaction {
   id: string;
@@ -8,7 +8,9 @@ export interface NewTransaction {
   entries: EntryInput[];
 }
 
-export type KeyClaim = { outcome: "claimed" } | { outcome: "exists"; requestHash: string; txnId: string };
+export type KeyClaim =
+  | { outcome: 'claimed' }
+  | { outcome: 'exists'; requestHash: string; txnId: string };
 
 /** Operations available inside one atomic unit of work. */
 export interface LedgerTx {
