@@ -8,14 +8,12 @@ const uniqueAccounts = (txn: NewTransaction): Map<string, AccountRef> =>
 
 /** Parallel arrays for `insertAccounts`. Deduplicated and sorted by id (see the query). */
 export function accountParams(txn: NewTransaction): [string[], string[], string[], string[]] {
-  const accounts = uniqueAccounts(txn);
-  const ids = [...accounts.keys()].toSorted();
-  const refs = ids.map((id) => accounts.get(id));
+  const sorted = [...uniqueAccounts(txn)].toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return [
-    ids,
-    refs.map((a) => a?.scope ?? ''),
-    refs.map((a) => a?.kind ?? ''),
-    ids.map(() => txn.currency),
+    sorted.map(([id]) => id),
+    sorted.map(([, ref]) => ref.scope),
+    sorted.map(([, ref]) => ref.kind),
+    sorted.map(() => txn.currency),
   ];
 }
 

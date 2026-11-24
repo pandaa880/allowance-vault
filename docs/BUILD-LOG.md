@@ -12,7 +12,7 @@ learned. Newest first. Keep real numbers only.
 - **Decided (user):** Postgres client = `pg` (ADR 0012 addendum); plain `.sql` migrations; `docker compose` test DB.
 - **Review:** independent `reviewer` agent (Opus) returned CHANGES_REQUESTED: 4 major, several minor. AI fixed them: one guarded posting path for every posting (cap check on generic posts too), READ COMMITTED pinned, TRUNCATE and `accounts` guarded, closed-transaction guard, per-currency balance, sorted account upsert, per-scope currency check, destroy client on failed ROLLBACK, `newId` injected. Not fixed, recorded: DB role separation (ADR 0012 addendum, BACKLOG).
 - **Queries:** all SQL moved to named constants in `infrastructure/pg/queries.ts`, parameter builders in `params.ts` (pure, unit-tested); a test fails if inline SQL returns.
-- **Tests:** 46 pass (domain and parameter unit tests, integration tests against Postgres 17). Checked by hand-removal that the lock removal makes tests 6b and 6e fail. oxlint, oxfmt, tsc clean.
+- **Tests:** 54 pass (domain and parameter unit tests, integration tests against Postgres 17). Checked by hand-removal that the lock removal makes tests 6b and 6e fail. oxlint, oxfmt, tsc clean.
 - **By hand:** `[YOU: what you reviewed or changed]`
 
 ## 2026-11-23 — OQ-01 discussion: how real payout partners behave

@@ -51,7 +51,12 @@ export const ledgerQueries = {
     GROUP BY a.kind, e.direction`,
 } as const;
 
+/** Migrations own their transaction statements, so changing the ledger's isolation level above
+ * never silently changes how DDL runs. */
 export const migrationQueries = {
+  begin: 'BEGIN',
+  commit: 'COMMIT',
+  rollback: 'ROLLBACK',
   /** $1 lock number. Session-level, so concurrent runners take turns. */
   lock: 'SELECT pg_advisory_lock($1)',
   unlock: 'SELECT pg_advisory_unlock($1)',

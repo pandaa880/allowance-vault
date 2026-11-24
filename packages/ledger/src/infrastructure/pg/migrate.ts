@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import type pg from 'pg';
-import { migrationQueries, unitOfWork } from './queries.js';
+import { migrationQueries } from './queries.js';
 
 const MIGRATIONS_DIR = new URL('../migrations/', import.meta.url);
 const MIGRATION_LOCK = 7_265_001; // arbitrary constant so concurrent runners take turns
@@ -21,12 +21,12 @@ export async function migrate(pool: pg.Pool): Promise<string[]> {
       if (done.has(file)) continue;
       const sql = await readFile(new URL(file, MIGRATIONS_DIR), 'utf8');
       try {
-        await client.query(unitOfWork.begin);
+        await client.query(migrationQueries.begin);
         await client.query(sql);
         await client.query(migrationQueries.record, [file]);
-        await client.query(unitOfWork.commit);
+        await client.query(migrationQueries.commit);
       } catch (error) {
-        await client.query(unitOfWork.rollback).catch(() => undefined); // keep the original error
+        await client.query(migrationQueries.rollback).catch(() => undefined); // keep the original error
         throw error;
       }
       applied.push(file);

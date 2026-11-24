@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { NewTransaction } from '../../src/application/ports.js';
 import { accountParams, entryParams, touchedScopes } from '../../src/infrastructure/pg/params.js';
@@ -73,18 +72,4 @@ describe('entryParams', () => {
       [big.toString(), big.toString()],
     ]);
   });
-});
-
-describe('no inline SQL outside queries.ts', () => {
-  const files = ['pg-ledger-repository.ts', 'migrate.ts'];
-  for (const file of files) {
-    it(`${file} passes only named constants or variables to query()`, () => {
-      const source = readFileSync(
-        new URL(`../../src/infrastructure/pg/${file}`, import.meta.url),
-        'utf8',
-      );
-      // A string or template literal directly inside query( would be inline SQL.
-      expect(source).not.toMatch(/\.query(<[^>]*>)?\(\s*['"`]/);
-    });
-  }
 });

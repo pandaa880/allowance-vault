@@ -73,10 +73,35 @@ describe('unitOfWork', () => {
   });
 });
 
+const find = (scopes: string[], currency: string) =>
+  pool.query(ledgerQueries.findMixedCurrency, [scopes, currency]);
+
 describe('ledgerQueries', () => {
-  it('lockScope runs and returns one row', async () => {
-    const result = await inUnit((c) => c.query(ledgerQueries.lockScope, [randomUUID()]));
-    expect(result.rowCount).toBe(1);
+  it('lockScope holds the lock until the unit of work ends, then releases it', async () => {
+    const scope = randomUUID();
+    const probe = await pool.connect();
+    // Asks, from another connection, whether the scope's lock is free right now.
+    const lockIsFree = async (): Promise<boolean | undefined> => {
+      await probe.query('BEGIN');
+      try {
+        const { rows } = await probe.query<{ free: boolean }>(
+          'SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS free',
+          [scope],
+        );
+        return rows[0]?.free;
+      } finally {
+        await probe.query('ROLLBACK');
+      }
+    };
+    try {
+      await inUnit(async (c) => {
+        await c.query(ledgerQueries.lockScope, [scope]);
+        expect(await lockIsFree()).toBe(false); // held while the unit is open
+      });
+      expect(await lockIsFree()).toBe(true); // released at commit
+    } finally {
+      probe.release();
+    }
   });
 
   it('claimIdempotencyKey inserts once, then reports the key as taken', async () => {
@@ -117,12 +142,16 @@ describe('ledgerQueries', () => {
   });
 
   it('findMixedCurrency finds another currency in a scope, and only then', async () => {
-    const scope = `scope-${randomUUID()}`;
-    await inUnit((c) => c.query(ledgerQueries.insertAccounts, accountParams(newTxn(scope))));
-    const mixed = await pool.query(ledgerQueries.findMixedCurrency, [[scope], 'INR']);
-    const same = await pool.query(ledgerQueries.findMixedCurrency, [[scope], 'USDC']);
-    expect(mixed.rowCount).toBeGreaterThan(0); // one row per mismatched account
-    expect(same.rowCount).toBe(0);
+    const usdcScope = `scope-${randomUUID()}`;
+    const inrScope = `scope-${randomUUID()}`;
+    await inUnit(async (c) => {
+      await c.query(ledgerQueries.insertAccounts, accountParams(newTxn(usdcScope)));
+      await c.query(ledgerQueries.insertAccounts, accountParams(newTxn(inrScope, 'INR')));
+    });
+    expect((await find([usdcScope], 'INR')).rowCount).toBeGreaterThan(0); // one row per account
+    expect((await find([usdcScope], 'USDC')).rowCount).toBe(0);
+    // The scope filter matters: an INR scope elsewhere must not count against a USDC scope.
+    expect((await find([usdcScope, inrScope], 'USDC')).rowCount).toBeGreaterThan(0);
   });
 
   it('insertTransaction and insertEntries write a balanced transaction that commits', async () => {
