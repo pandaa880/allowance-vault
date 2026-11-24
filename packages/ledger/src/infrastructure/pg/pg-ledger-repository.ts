@@ -6,7 +6,9 @@ import type {
   NewTransaction,
 } from '../../application/ports.js';
 import { CurrencyMismatch } from '../../domain/errors.js';
-import { accountId, type AccountKind, type Totals } from '../../domain/journal.js';
+import type { AccountKind, Totals } from '../../domain/journal.js';
+import { accountParams, entryParams, touchedScopes } from './params.js';
+import { ledgerQueries, unitOfWork } from './queries.js';
 
 /**
  * Money never passes through a JS number: amounts are sent as strings into `::bigint[]`, and
@@ -21,20 +23,20 @@ class PgLedgerTx implements LedgerTx {
   constructor(private readonly client: PoolClient) {}
 
   async lockScope(scope: string): Promise<void> {
-    await this.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [scope]);
+    await this.client.query(ledgerQueries.lockScope, [scope]);
   }
 
   async claimIdempotencyKey(key: string, requestHash: string, txnId: string): Promise<KeyClaim> {
     // A concurrent insert of the same key blocks until the other transaction ends, so the
     // follow-up SELECT always sees the winner's row (READ COMMITTED: fresh snapshot per statement).
-    const inserted = await this.client.query(
-      `INSERT INTO idempotency_keys (key, request_hash, txn_id) VALUES ($1, $2, $3)
-       ON CONFLICT (key) DO NOTHING`,
-      [key, requestHash, txnId],
-    );
+    const inserted = await this.client.query(ledgerQueries.claimIdempotencyKey, [
+      key,
+      requestHash,
+      txnId,
+    ]);
     if (inserted.rowCount === 1) return { outcome: 'claimed' };
     const existing = await this.client.query<{ request_hash: string; txn_id: string }>(
-      'SELECT request_hash, txn_id FROM idempotency_keys WHERE key = $1',
+      ledgerQueries.findIdempotencyKey,
       [key],
     );
     const row = existing.rows[0];
@@ -44,47 +46,20 @@ class PgLedgerTx implements LedgerTx {
 
   async insertTransaction(txn: NewTransaction): Promise<void> {
     await this.ensureAccounts(txn);
-    await this.client.query('INSERT INTO transactions (id, kind, claim_id) VALUES ($1, $2, $3)', [
-      txn.id,
-      txn.kind,
-      txn.claimId,
-    ]);
-    await this.client.query(
-      `INSERT INTO journal_entries (txn_id, account_id, direction, amount_base_units)
-       SELECT $1, * FROM unnest($2::text[], $3::text[], $4::bigint[])`,
-      [
-        txn.id,
-        txn.entries.map((e) => accountId(e.account)),
-        txn.entries.map((e) => e.direction),
-        txn.entries.map((e) => e.amount.toString()),
-      ],
-    );
+    await this.client.query(ledgerQueries.insertTransaction, [txn.id, txn.kind, txn.claimId]);
+    await this.client.query(ledgerQueries.insertEntries, entryParams(txn));
   }
 
   /**
-   * Creates missing accounts, sorted by id so two writers touching the same new accounts take
-   * row locks in the same order (no 40P01 deadlock), then checks that every account in the
-   * touched scopes uses one currency (a scope never mixes USDC micro-units with paise).
+   * Creates missing accounts, then checks that every account in the touched scopes uses one
+   * currency (a scope never mixes USDC micro-units with paise).
    */
   private async ensureAccounts(txn: NewTransaction): Promise<void> {
-    const accounts = new Map(txn.entries.map((e) => [accountId(e.account), e.account]));
-    const ids = [...accounts.keys()].toSorted();
-    await this.client.query(
-      `INSERT INTO accounts (id, scope, kind, currency)
-       SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
-       ON CONFLICT (id) DO NOTHING`,
-      [
-        ids,
-        ids.map((id) => accounts.get(id)?.scope),
-        ids.map((id) => accounts.get(id)?.kind),
-        ids.map(() => txn.currency),
-      ],
-    );
-    const scopes = [...new Set([...accounts.values()].map((a) => a.scope))];
-    const mixed = await this.client.query(
-      'SELECT 1 FROM accounts WHERE scope = ANY($1::text[]) AND currency <> $2',
-      [scopes, txn.currency],
-    );
+    await this.client.query(ledgerQueries.insertAccounts, accountParams(txn));
+    const mixed = await this.client.query(ledgerQueries.findMixedCurrency, [
+      touchedScopes(txn),
+      txn.currency,
+    ]);
     if (mixed.rowCount) {
       throw new CurrencyMismatch(
         `transaction ${txn.id} is in ${txn.currency} but a touched scope already holds another currency`,
@@ -93,17 +68,11 @@ class PgLedgerTx implements LedgerTx {
   }
 
   async scopeTotals(scope: string): Promise<Partial<Record<AccountKind, Totals>>> {
-    // sum() is numeric; read it as text so a large total cannot lose precision.
     const { rows } = await this.client.query<{
       kind: AccountKind;
       direction: string;
       total: string;
-    }>(
-      `SELECT a.kind, e.direction, sum(e.amount_base_units)::text AS total
-         FROM journal_entries e JOIN accounts a ON a.id = e.account_id
-        WHERE a.scope = $1 GROUP BY a.kind, e.direction`,
-      [scope],
-    );
+    }>(ledgerQueries.scopeTotals, [scope]);
     const totals: Partial<Record<AccountKind, Totals>> = {};
     for (const row of rows) {
       const entry = (totals[row.kind] ??= { debits: 0n, credits: 0n });
@@ -121,15 +90,12 @@ export class PgLedgerRepository implements LedgerRepository {
     const client = await this.pool.connect();
     let rollbackFailure: Error | undefined;
     try {
-      // Pinned, not inherited from the server default: the per-scope lock plus a fresh snapshot
-      // per statement is what makes read-check-write safe. Under REPEATABLE READ the snapshot
-      // would be taken before the lock wait and two reserves could both pass the cap check.
-      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+      await client.query(unitOfWork.begin);
       const result = await work(new PgLedgerTx(client));
-      await client.query('COMMIT');
+      await client.query(unitOfWork.commit);
       return result;
     } catch (error) {
-      await client.query('ROLLBACK').catch((failure: Error) => {
+      await client.query(unitOfWork.rollback).catch((failure: Error) => {
         rollbackFailure = failure;
       });
       throw error;
