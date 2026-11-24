@@ -1,4 +1,4 @@
-import { Pool, types, type PoolClient } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import type {
   KeyClaim,
   LedgerRepository,
@@ -8,19 +8,13 @@ import type {
 import { CurrencyMismatch } from '../../domain/errors.js';
 import { accountId, type AccountKind, type Totals } from '../../domain/journal.js';
 
-const INT8_OID = 20;
-
-/** Pool that returns int8 columns as bigint, so base units never pass through a JS number. */
+/**
+ * Money never passes through a JS number: amounts are sent as strings into `::bigint[]`, and
+ * every bigint read (`sum(...)`) is cast to `::text` in SQL and parsed with `BigInt`. So the
+ * pool needs no custom int8 type parser.
+ */
 export function createPgPool(connectionString: string): Pool {
-  return new Pool({
-    connectionString,
-    types: {
-      getTypeParser: ((oid: number, format?: 'text' | 'binary') =>
-        oid === INT8_OID
-          ? BigInt
-          : types.getTypeParser(oid, format as 'text')) as typeof types.getTypeParser,
-    },
-  });
+  return new Pool({ connectionString });
 }
 
 class PgLedgerTx implements LedgerTx {
@@ -32,7 +26,7 @@ class PgLedgerTx implements LedgerTx {
 
   async claimIdempotencyKey(key: string, requestHash: string, txnId: string): Promise<KeyClaim> {
     // A concurrent insert of the same key blocks until the other transaction ends, so the
-    // follow-up SELECT always sees the winner's row.
+    // follow-up SELECT always sees the winner's row (READ COMMITTED: fresh snapshot per statement).
     const inserted = await this.client.query(
       `INSERT INTO idempotency_keys (key, request_hash, txn_id) VALUES ($1, $2, $3)
        ON CONFLICT (key) DO NOTHING`,
@@ -49,25 +43,7 @@ class PgLedgerTx implements LedgerTx {
   }
 
   async insertTransaction(txn: NewTransaction): Promise<void> {
-    const ids = txn.entries.map((e) => accountId(e.account));
-    await this.client.query(
-      `INSERT INTO accounts (id, scope, kind, currency)
-       SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) ON CONFLICT (id) DO NOTHING`,
-      [
-        ids,
-        txn.entries.map((e) => e.account.scope),
-        txn.entries.map((e) => e.account.kind),
-        txn.entries.map(() => txn.currency),
-      ],
-    );
-    const mismatched = await this.client.query(
-      'SELECT 1 FROM accounts WHERE id = ANY($1::text[]) AND currency <> $2',
-      [ids, txn.currency],
-    );
-    if (mismatched.rowCount)
-      throw new CurrencyMismatch(
-        `an account in ${txn.id} uses another currency than ${txn.currency}`,
-      );
+    await this.ensureAccounts(txn);
     await this.client.query('INSERT INTO transactions (id, kind, claim_id) VALUES ($1, $2, $3)', [
       txn.id,
       txn.kind,
@@ -78,11 +54,42 @@ class PgLedgerTx implements LedgerTx {
        SELECT $1, * FROM unnest($2::text[], $3::text[], $4::bigint[])`,
       [
         txn.id,
-        ids,
+        txn.entries.map((e) => accountId(e.account)),
         txn.entries.map((e) => e.direction),
         txn.entries.map((e) => e.amount.toString()),
       ],
     );
+  }
+
+  /**
+   * Creates missing accounts, sorted by id so two writers touching the same new accounts take
+   * row locks in the same order (no 40P01 deadlock), then checks that every account in the
+   * touched scopes uses one currency (a scope never mixes USDC micro-units with paise).
+   */
+  private async ensureAccounts(txn: NewTransaction): Promise<void> {
+    const accounts = new Map(txn.entries.map((e) => [accountId(e.account), e.account]));
+    const ids = [...accounts.keys()].toSorted();
+    await this.client.query(
+      `INSERT INTO accounts (id, scope, kind, currency)
+       SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        ids,
+        ids.map((id) => accounts.get(id)?.scope),
+        ids.map((id) => accounts.get(id)?.kind),
+        ids.map(() => txn.currency),
+      ],
+    );
+    const scopes = [...new Set([...accounts.values()].map((a) => a.scope))];
+    const mixed = await this.client.query(
+      'SELECT 1 FROM accounts WHERE scope = ANY($1::text[]) AND currency <> $2',
+      [scopes, txn.currency],
+    );
+    if (mixed.rowCount) {
+      throw new CurrencyMismatch(
+        `transaction ${txn.id} is in ${txn.currency} but a touched scope already holds another currency`,
+      );
+    }
   }
 
   async scopeTotals(scope: string): Promise<Partial<Record<AccountKind, Totals>>> {
@@ -112,16 +119,23 @@ export class PgLedgerRepository implements LedgerRepository {
 
   async withTransaction<T>(work: (tx: LedgerTx) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
+    let rollbackFailure: Error | undefined;
     try {
-      await client.query('BEGIN');
+      // Pinned, not inherited from the server default: the per-scope lock plus a fresh snapshot
+      // per statement is what makes read-check-write safe. Under REPEATABLE READ the snapshot
+      // would be taken before the lock wait and two reserves could both pass the cap check.
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
       const result = await work(new PgLedgerTx(client));
       await client.query('COMMIT');
       return result;
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      await client.query('ROLLBACK').catch((failure: Error) => {
+        rollbackFailure = failure;
+      });
       throw error;
     } finally {
-      client.release();
+      // A client whose ROLLBACK failed may still be inside a transaction: destroy it.
+      client.release(rollbackFailure);
     }
   }
 }

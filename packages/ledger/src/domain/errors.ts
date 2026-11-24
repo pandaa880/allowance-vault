@@ -9,15 +9,21 @@ export class IdempotencyConflict extends Error {
   }
 }
 
+/** The posting would leave `unused` below zero in `scope`, so it was rolled back. */
 export class OverCommitted extends Error {
   override readonly name = 'OverCommitted';
   constructor(
     readonly scope: string,
-    readonly unused: bigint,
-    readonly requested: bigint,
+    /** What `unused` would have been (negative). */
+    readonly unusedAfter: bigint,
   ) {
-    super(`scope ${scope}: requested ${requested} but only ${unused} unused`);
+    super(`scope ${scope}: posting would over-commit by ${-unusedAfter}`);
   }
+}
+
+/** An amount is not a positive integer that fits a Postgres bigint. */
+export class InvalidAmount extends Error {
+  override readonly name = 'InvalidAmount';
 }
 
 export class CurrencyMismatch extends Error {

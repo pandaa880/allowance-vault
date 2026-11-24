@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { IdempotencyConflict, OverCommitted } from '../domain/errors.js';
 import {
   assertBalanced,
@@ -28,13 +27,28 @@ export interface ReserveClaim extends FundAllowance {
 
 export interface LedgerDeps {
   repo: LedgerRepository;
-  newId?: () => string;
+  /** Id generator, injected by the composition root so this layer stays free of platform APIs. */
+  newId: () => string;
 }
 
-export function createLedger({ repo, newId = randomUUID }: LedgerDeps) {
-  /** Validates, then posts once per idempotency key (L2, L3). Runs inside the caller's unit of work. */
+const uniqueSorted = (values: string[]): string[] => [...new Set(values)].toSorted();
+
+export function createLedger({ repo, newId }: LedgerDeps) {
+  /**
+   * The only way entries reach the journal. Every posting, whatever its kind:
+   * 1. validates the entries (L2),
+   * 2. locks each touched scope in sorted order (no deadlock, and the cap check below cannot
+   *    interleave with another writer of the same scope),
+   * 3. claims the idempotency key once (L3),
+   * 4. writes, then re-derives `unused` per scope and rolls everything back if one went negative.
+   * Correctness relies on READ COMMITTED (each statement after the lock sees fresh data); the
+   * repository starts every unit of work at that level.
+   */
   async function post(tx: LedgerTx, request: PostingRequest): Promise<PostResult> {
     assertBalanced(request.entries);
+    const scopes = uniqueSorted(request.entries.map((e) => e.account.scope));
+    for (const scope of scopes) await tx.lockScope(scope);
+
     const hash = requestHash(request);
     const txnId = newId();
     const claim = await tx.claimIdempotencyKey(request.idempotencyKey, hash, txnId);
@@ -42,6 +56,7 @@ export function createLedger({ repo, newId = randomUUID }: LedgerDeps) {
       if (claim.requestHash !== hash) throw new IdempotencyConflict(request.idempotencyKey);
       return { status: 'replayed', txnId: claim.txnId };
     }
+
     await tx.insertTransaction({
       id: txnId,
       kind: request.kind,
@@ -49,6 +64,10 @@ export function createLedger({ repo, newId = randomUUID }: LedgerDeps) {
       currency: request.currency,
       entries: request.entries,
     });
+    for (const scope of scopes) {
+      const { unused } = summarize(await tx.scopeTotals(scope));
+      if (unused < 0n) throw new OverCommitted(scope, unused);
+    }
     return { status: 'created', txnId };
   }
 
@@ -72,35 +91,25 @@ export function createLedger({ repo, newId = randomUUID }: LedgerDeps) {
       ],
     });
 
-  /** Sets aside `amount` for a claim; refuses when it would push `unused` below zero. */
+  /** Sets aside `amount` for a claim; refused when it would push `unused` below zero. */
   const reserveClaim = (cmd: ReserveClaim): Promise<PostResult> =>
-    repo.withTransaction(async (tx) => {
-      await tx.lockScope(cmd.scope);
-      const result = await post(tx, {
-        idempotencyKey: cmd.idempotencyKey,
-        kind: 'reserve',
-        claimId: cmd.claimId,
-        currency: cmd.currency,
-        entries: [
-          {
-            account: { scope: cmd.scope, kind: 'reserved' },
-            direction: 'debit',
-            amount: cmd.amount,
-          },
-          {
-            account: { scope: cmd.scope, kind: 'source' },
-            direction: 'credit',
-            amount: cmd.amount,
-          },
-        ],
-      });
-      // `post` already wrote the entries, so `unused` below is the value after this reserve.
-      // A negative result throws, which rolls the whole unit of work back (nothing is written).
-      const { unused } = summarize(await tx.scopeTotals(cmd.scope));
-      if (result.status === 'created' && unused < 0n) {
-        throw new OverCommitted(cmd.scope, unused + cmd.amount, cmd.amount);
-      }
-      return result;
+    postTransaction({
+      idempotencyKey: cmd.idempotencyKey,
+      kind: 'reserve',
+      claimId: cmd.claimId,
+      currency: cmd.currency,
+      entries: [
+        {
+          account: { scope: cmd.scope, kind: 'reserved' },
+          direction: 'debit',
+          amount: cmd.amount,
+        },
+        {
+          account: { scope: cmd.scope, kind: 'source' },
+          direction: 'credit',
+          amount: cmd.amount,
+        },
+      ],
     });
 
   const periodSummary = (scope: string): Promise<PeriodSummary> =>

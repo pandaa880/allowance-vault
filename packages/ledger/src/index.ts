@@ -1,4 +1,5 @@
-// Composition root: the only place that wires adapters to use cases.
+// Composition root: the only place that wires adapters and platform APIs to use cases.
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { createLedger, type Ledger } from './application/ledger.js';
 import { PgLedgerRepository } from './infrastructure/pg/pg-ledger-repository.js';
@@ -11,4 +12,4 @@ export { migrate } from './infrastructure/pg/migrate.js';
 export { createPgPool, PgLedgerRepository } from './infrastructure/pg/pg-ledger-repository.js';
 
 export const createPgLedger = (pool: pg.Pool): Ledger =>
-  createLedger({ repo: new PgLedgerRepository(pool) });
+  createLedger({ repo: new PgLedgerRepository(pool), newId: randomUUID });

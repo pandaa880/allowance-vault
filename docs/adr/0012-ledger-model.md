@@ -149,3 +149,10 @@ loosening after one day. The ledger only records which rule version was active f
 
 ## Addendum 2026-11-24: Postgres client
 The TypeScript packages use `pg` (node-postgres) with hand-written SQL migrations. Reasons: the ledger invariants (append-only, balanced entries, idempotency-key uniqueness) live in the database as SQL, and a raw-SQL client keeps `FOR UPDATE`, `ON CONFLICT` and SQLSTATE `23505` handling visible and testable. Alternatives considered: `postgres` (porsager), Kysely, Drizzle. `int8` columns are parsed to `BigInt` in one place, so base units never pass through a float.
+
+## Addendum 2026-11-24: as built in PR 1, and what is deferred
+- **Idempotency table:** a global `key` primary key with `request_hash` and `txn_id`. No `(scope, key)` pair, no stored response and no expiry yet; those belong to the partner request keys in slice 2.
+- **One posting path:** every posting takes the touched scopes locks in sorted order, claims the key, writes, then re-derives `unused` per scope and rolls back with `OverCommitted` if one went negative. This holds for generic postings too, so lowering `authorized` below what is reserved is refused.
+- **Isolation:** each unit of work starts `READ COMMITTED` explicitly. Under REPEATABLE READ the snapshot is taken before the lock wait and two reserves could both pass the cap check (test 6e runs with that as the server default).
+- **Database guards:** deferred balance check per currency with a two-entry minimum, closed transactions reject later entries, every table (accounts included) blocks UPDATE, DELETE and TRUNCATE, and `accounts.id` must equal `scope/kind`.
+- **Deferred (slice 1 risk accepted):** the application connects as a superuser and table owner, so it could disable triggers (`session_replication_role`) or alter tables. The text "the application role has no such grant" is not yet true. Before any hosted deploy: migrate as the owner, run the app as a non-owner role with only SELECT and INSERT. Tracked in the private BACKLOG.

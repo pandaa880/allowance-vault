@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { UnbalancedTransaction } from '../../src/domain/errors.js';
-import { assertBalanced, requestHash, type PostingRequest } from '../../src/domain/journal.js';
+import { InvalidAmount, UnbalancedTransaction } from '../../src/domain/errors.js';
+import {
+  assertBalanced,
+  MAX_AMOUNT,
+  requestHash,
+  type PostingRequest,
+} from '../../src/domain/journal.js';
 
 const big = 2n ** 60n + 7n; // above Number.MAX_SAFE_INTEGER
 
@@ -31,9 +36,16 @@ describe('assertBalanced (L2, domain)', () => {
     expect(() => assertBalanced(first ? [first] : [])).toThrow(UnbalancedTransaction);
   });
 
-  it('rejects zero and negative amounts', () => {
-    const zero = request().entries.map((e) => ({ ...e, amount: 0n }));
-    expect(() => assertBalanced(zero)).toThrow(UnbalancedTransaction);
+  it('rejects zero, negative and above-bigint amounts', () => {
+    for (const amount of [0n, -1n, MAX_AMOUNT + 1n]) {
+      const entries = request().entries.map((e) => ({ ...e, amount }));
+      expect(() => assertBalanced(entries)).toThrow(InvalidAmount);
+    }
+  });
+
+  it('accepts the largest bigint amount', () => {
+    const entries = request().entries.map((e) => ({ ...e, amount: MAX_AMOUNT }));
+    expect(() => assertBalanced(entries)).not.toThrow();
   });
 });
 

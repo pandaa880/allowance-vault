@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { UnbalancedTransaction } from './errors.js';
+import { InvalidAmount, UnbalancedTransaction } from './errors.js';
 
 /** Integer base units only: USDC 6 decimals, INR paise. Never a float. */
 export type Currency = 'USDC' | 'INR';
@@ -43,12 +43,15 @@ export const accountId = ({ scope, kind }: AccountRef): string => `${scope}/${ki
 const sum = (entries: EntryInput[], direction: Direction): bigint =>
   entries.filter((e) => e.direction === direction).reduce((total, e) => total + e.amount, 0n);
 
-/** L2: debits equal credits, at least two entries, every amount positive. */
+/** Largest value a Postgres bigint column holds. */
+export const MAX_AMOUNT = 2n ** 63n - 1n;
+
+/** L2: debits equal credits, at least two entries, every amount in 1..MAX_AMOUNT. */
 export function assertBalanced(entries: EntryInput[]): void {
   if (entries.length < 2)
     throw new UnbalancedTransaction('a transaction needs at least two entries');
-  if (entries.some((e) => e.amount <= 0n))
-    throw new UnbalancedTransaction('amounts must be positive');
+  if (entries.some((e) => e.amount <= 0n || e.amount > MAX_AMOUNT))
+    throw new InvalidAmount(`amounts must be between 1 and ${MAX_AMOUNT}`);
   if (sum(entries, 'debit') !== sum(entries, 'credit')) {
     throw new UnbalancedTransaction('debits do not equal credits');
   }

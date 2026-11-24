@@ -8,6 +8,7 @@ const MIGRATION_LOCK = 7_265_001; // arbitrary constant so concurrent runners ta
 export async function migrate(pool: pg.Pool): Promise<string[]> {
   const client = await pool.connect();
   const applied: string[] = [];
+  let failure: Error | undefined;
   try {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK]);
     await client.query(
@@ -29,14 +30,18 @@ export async function migrate(pool: pg.Pool): Promise<string[]> {
         await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [file]);
         await client.query('COMMIT');
       } catch (error) {
-        await client.query('ROLLBACK');
+        await client.query('ROLLBACK').catch(() => undefined); // keep the original error
         throw error;
       }
       applied.push(file);
     }
+  } catch (error) {
+    failure = error instanceof Error ? error : new Error(String(error));
+    throw error;
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK]).catch(() => undefined);
-    client.release();
+    // After a failure the session state is uncertain: destroy the client instead of pooling it.
+    client.release(failure);
   }
   return applied;
 }
