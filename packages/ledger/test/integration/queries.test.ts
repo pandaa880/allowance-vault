@@ -3,22 +3,23 @@ import { Pool, type PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { NewTransaction } from '../../src/application/ports.js';
 import { createPgPool, migrate } from '../../src/index.js';
-import { accountParams, entryParams } from '../../src/infrastructure/pg/params.js';
+import { accountParams, entryParams, scopeParams } from '../../src/infrastructure/pg/params.js';
 import {
   ledgerQueries,
   migrationQueries,
   unitOfWork,
 } from '../../src/infrastructure/pg/queries.js';
+import { databaseUrl } from './db.js';
 
 /** Each query is run on its own against real Postgres, so a typo or a wrong parameter order
  * fails here and not only through a use case. */
 
-const url = process.env['DATABASE_URL'] ?? 'postgres://vault:vault@localhost:54329/vault_test';
 const big = 2n ** 62n + 3n;
+const HASH = 'a'.repeat(64); // the hash column only accepts 64 lowercase hex characters
 
 let pool: Pool;
 beforeAll(async () => {
-  pool = createPgPool(url);
+  pool = createPgPool(databaseUrl);
   await migrate(pool);
 });
 afterAll(async () => {
@@ -52,10 +53,32 @@ const newTxn = (scope: string, currency: 'USDC' | 'INR' = 'USDC'): NewTransactio
   ],
 });
 
+/** Scopes, accounts, the transaction row and its entries, in the order the adapter writes them. */
+async function writeTxn(client: PoolClient, txn: NewTransaction): Promise<void> {
+  await client.query(ledgerQueries.insertScopes, scopeParams(txn));
+  await client.query(ledgerQueries.insertAccounts, accountParams(txn));
+  await client.query(ledgerQueries.insertTransaction, [txn.id, txn.kind, txn.claimId]);
+  await client.query(ledgerQueries.insertEntries, entryParams(txn));
+}
+
+const find = (scopes: string[], currency: string) =>
+  pool.query(ledgerQueries.findMixedCurrency, [scopes, currency]);
+const lockKeys = async (scopes: string[]): Promise<string[]> => {
+  const { rows } = await pool.query<{ key: string }>(ledgerQueries.scopeLockKeys, [scopes]);
+  return rows.map((r) => r.key);
+};
+
+const read = (client: PoolClient) =>
+  client.query<{ lock: string; statement: string; idle: string }>(
+    `SELECT current_setting('lock_timeout') AS lock,
+            current_setting('statement_timeout') AS statement,
+            current_setting('idle_in_transaction_session_timeout') AS idle`,
+  );
+
 describe('unitOfWork', () => {
   it('begin starts READ COMMITTED even when the server default is stricter', async () => {
     const strict = new Pool({
-      connectionString: url,
+      connectionString: databaseUrl,
       options: '-c default_transaction_isolation=serializable',
     });
     const client = await strict.connect();
@@ -71,22 +94,43 @@ describe('unitOfWork', () => {
       await strict.end();
     }
   });
+
+  it('setTimeouts applies for this transaction only', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query(unitOfWork.begin);
+      await client.query(unitOfWork.setTimeouts, ['1s', '2s', '3s']);
+      expect((await read(client)).rows[0]).toEqual({ lock: '1s', statement: '2s', idle: '3s' });
+      await client.query(unitOfWork.commit);
+      // After the transaction the connection is back to its defaults (nothing leaks into the pool).
+      expect((await read(client)).rows[0]).toEqual({ lock: '0', statement: '0', idle: '0' });
+    } finally {
+      client.release();
+    }
+  });
 });
 
-const find = (scopes: string[], currency: string) =>
-  pool.query(ledgerQueries.findMixedCurrency, [scopes, currency]);
-
 describe('ledgerQueries', () => {
-  it('lockScope holds the lock until the unit of work ends, then releases it', async () => {
-    const scope = randomUUID();
+  it('scopeLockKeys returns distinct keys, ascending, whatever order the scopes come in', async () => {
+    const scopes = ['b', 'a', 'c', 'a'];
+    const keys = await lockKeys(scopes);
+    expect(keys).toHaveLength(3);
+    expect(keys.map(BigInt)).toEqual(
+      keys.map(BigInt).toSorted((x, y) => (x < y ? -1 : x > y ? 1 : 0)),
+    );
+    expect(await lockKeys(scopes.toReversed())).toEqual(keys);
+  });
+
+  it('lockKey holds the lock until the unit of work ends, then releases it', async () => {
+    const [key] = await lockKeys([randomUUID()]);
     const probe = await pool.connect();
-    // Asks, from another connection, whether the scope's lock is free right now.
+    // Asks, from another connection, whether the lock is free right now.
     const lockIsFree = async (): Promise<boolean | undefined> => {
       await probe.query('BEGIN');
       try {
         const { rows } = await probe.query<{ free: boolean }>(
-          'SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS free',
-          [scope],
+          'SELECT pg_try_advisory_xact_lock($1::bigint) AS free',
+          [key],
         );
         return rows[0]?.free;
       } finally {
@@ -95,7 +139,7 @@ describe('ledgerQueries', () => {
     };
     try {
       await inUnit(async (c) => {
-        await c.query(ledgerQueries.lockScope, [scope]);
+        await c.query(ledgerQueries.lockKey, [key]);
         expect(await lockIsFree()).toBe(false); // held while the unit is open
       });
       expect(await lockIsFree()).toBe(true); // released at commit
@@ -108,21 +152,16 @@ describe('ledgerQueries', () => {
     const key = randomUUID();
     const txn = newTxn(`scope-${randomUUID()}`);
     const claim = (c: PoolClient) =>
-      c.query(ledgerQueries.claimIdempotencyKey, [key, 'hash-1', txn.id]);
-    // The key references its transaction row, which is checked at commit, so insert it too.
+      c.query(ledgerQueries.claimIdempotencyKey, [key, HASH, txn.id]);
+    // The key references its transaction row, which is checked at commit, so write it too.
     await inUnit(async (c) => {
       expect((await claim(c)).rowCount).toBe(1);
-      await c.query(ledgerQueries.insertAccounts, accountParams(txn));
-      await c.query(ledgerQueries.insertTransaction, [txn.id, txn.kind, txn.claimId]);
-      await c.query(ledgerQueries.insertEntries, entryParams(txn));
+      await writeTxn(c, txn);
     });
     await inUnit(async (c) => {
       expect((await claim(c)).rowCount).toBe(0);
-      const found = await c.query<{ request_hash: string; txn_id: string }>(
-        ledgerQueries.findIdempotencyKey,
-        [key],
-      );
-      expect(found.rows[0]).toEqual({ request_hash: 'hash-1', txn_id: txn.id });
+      const found = await c.query(ledgerQueries.findIdempotencyKey, [key]);
+      expect(found.rows[0]).toEqual({ request_hash: HASH, txn_id: txn.id });
     });
   });
 
@@ -131,13 +170,20 @@ describe('ledgerQueries', () => {
     expect(found.rowCount).toBe(0);
   });
 
+  it('insertScopes is idempotent (ON CONFLICT DO NOTHING)', async () => {
+    const txn = newTxn(`scope-${randomUUID()}`);
+    await inUnit(async (c) => {
+      expect((await c.query(ledgerQueries.insertScopes, scopeParams(txn))).rowCount).toBe(1);
+      expect((await c.query(ledgerQueries.insertScopes, scopeParams(txn))).rowCount).toBe(0);
+    });
+  });
+
   it('insertAccounts is idempotent (ON CONFLICT DO NOTHING)', async () => {
     const txn = newTxn(`scope-${randomUUID()}`);
     await inUnit(async (c) => {
-      const first = await c.query(ledgerQueries.insertAccounts, accountParams(txn));
-      const second = await c.query(ledgerQueries.insertAccounts, accountParams(txn));
-      expect(first.rowCount).toBe(2);
-      expect(second.rowCount).toBe(0);
+      await c.query(ledgerQueries.insertScopes, scopeParams(txn));
+      expect((await c.query(ledgerQueries.insertAccounts, accountParams(txn))).rowCount).toBe(2);
+      expect((await c.query(ledgerQueries.insertAccounts, accountParams(txn))).rowCount).toBe(0);
     });
   });
 
@@ -145,19 +191,19 @@ describe('ledgerQueries', () => {
     const usdcScope = `scope-${randomUUID()}`;
     const inrScope = `scope-${randomUUID()}`;
     await inUnit(async (c) => {
-      await c.query(ledgerQueries.insertAccounts, accountParams(newTxn(usdcScope)));
-      await c.query(ledgerQueries.insertAccounts, accountParams(newTxn(inrScope, 'INR')));
+      await c.query(ledgerQueries.insertScopes, scopeParams(newTxn(usdcScope)));
+      await c.query(ledgerQueries.insertScopes, scopeParams(newTxn(inrScope, 'INR')));
     });
-    expect((await find([usdcScope], 'INR')).rowCount).toBeGreaterThan(0); // one row per account
+    expect((await find([usdcScope], 'INR')).rowCount).toBe(1);
     expect((await find([usdcScope], 'USDC')).rowCount).toBe(0);
     // The scope filter matters: an INR scope elsewhere must not count against a USDC scope.
-    expect((await find([usdcScope, inrScope], 'USDC')).rowCount).toBeGreaterThan(0);
+    expect((await find([usdcScope, inrScope], 'USDC')).rowCount).toBe(1);
   });
 
   it('insertTransaction and insertEntries write a balanced transaction that commits', async () => {
-    const scope = `scope-${randomUUID()}`;
-    const txn = newTxn(scope);
+    const txn = newTxn(`scope-${randomUUID()}`);
     await inUnit(async (c) => {
+      await c.query(ledgerQueries.insertScopes, scopeParams(txn));
       await c.query(ledgerQueries.insertAccounts, accountParams(txn));
       await c.query(ledgerQueries.insertTransaction, [txn.id, txn.kind, txn.claimId]);
       const entries = await c.query(ledgerQueries.insertEntries, entryParams(txn));
@@ -167,12 +213,7 @@ describe('ledgerQueries', () => {
 
   it('scopeTotals returns sums as exact text above 2^53', async () => {
     const scope = `scope-${randomUUID()}`;
-    const txn = newTxn(scope);
-    await inUnit(async (c) => {
-      await c.query(ledgerQueries.insertAccounts, accountParams(txn));
-      await c.query(ledgerQueries.insertTransaction, [txn.id, txn.kind, txn.claimId]);
-      await c.query(ledgerQueries.insertEntries, entryParams(txn));
-    });
+    await inUnit((c) => writeTxn(c, newTxn(scope)));
     const { rows } = await pool.query<{ kind: string; direction: string; total: string }>(
       ledgerQueries.scopeTotals,
       [scope],
@@ -190,16 +231,34 @@ describe('migrationQueries', () => {
     expect(rows.map((r) => r.name)).toContain('0001_init.sql');
   });
 
-  it('lock and unlock take and release the advisory lock', async () => {
+  it('lock and unlock take and release the two-int advisory lock', async () => {
     const client = await pool.connect();
     try {
-      const n = 7_265_999;
-      await client.query(migrationQueries.lock, [n]);
+      const args = [7265, 999];
+      await client.query(migrationQueries.lock, args);
       const unlocked = await client.query<{ pg_advisory_unlock: boolean }>(
         migrationQueries.unlock,
-        [n],
+        args,
       );
       expect(unlocked.rows[0]?.pg_advisory_unlock).toBe(true);
+    } finally {
+      client.release();
+    }
+  });
+
+  it('setLockTimeout applies inside the migration transaction only', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query(migrationQueries.begin);
+      await client.query(migrationQueries.setLockTimeout, ['3s']);
+      const inside = await client.query<{ t: string }>(
+        "SELECT current_setting('lock_timeout') AS t",
+      );
+      await client.query(migrationQueries.commit);
+      const after = await client.query<{ t: string }>(
+        "SELECT current_setting('lock_timeout') AS t",
+      );
+      expect([inside.rows[0]?.t, after.rows[0]?.t]).toEqual(['3s', '0']);
     } finally {
       client.release();
     }

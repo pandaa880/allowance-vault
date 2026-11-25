@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { NewTransaction } from '../../src/application/ports.js';
-import { accountParams, entryParams, touchedScopes } from '../../src/infrastructure/pg/params.js';
+import { touchedScopes } from '../../src/domain/journal.js';
+import { accountParams, entryParams, scopeParams } from '../../src/infrastructure/pg/params.js';
 
 const big = 2n ** 62n + 3n; // above Number.MAX_SAFE_INTEGER
 
@@ -53,7 +54,20 @@ describe('touchedScopes', () => {
         amount: 1n,
       },
     ];
-    expect(touchedScopes(txn({ entries }))).toEqual(['a', 'z']);
+    expect(touchedScopes(entries)).toEqual(['a', 'z']);
+  });
+});
+
+describe('scopeParams', () => {
+  it('returns the sorted scopes with one currency each', () => {
+    const entries = [
+      ...txn().entries,
+      { account: { scope: 'a', kind: 'source' as const }, direction: 'debit' as const, amount: 1n },
+    ];
+    expect(scopeParams(txn({ entries, currency: 'INR' }))).toEqual([
+      ['a', 'b'],
+      ['INR', 'INR'],
+    ]);
   });
 });
 

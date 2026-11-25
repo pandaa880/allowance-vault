@@ -3,41 +3,51 @@ import {
   assertBalanced,
   requestHash,
   summarize,
+  touchedScopes,
   type Currency,
   type PeriodSummary,
   type PostingRequest,
 } from '../domain/journal.js';
 import type { LedgerRepository, LedgerTx } from './ports.js';
+import { parsePostingRequest } from './schemas.js';
 
 export interface PostResult {
-  status: 'created' | 'replayed';
-  txnId: string;
+  readonly status: 'created' | 'replayed';
+  readonly txnId: string;
 }
 
 export interface FundAllowance {
-  idempotencyKey: string;
-  scope: string;
-  currency: Currency;
-  amount: bigint;
+  readonly idempotencyKey: string;
+  readonly scope: string;
+  readonly currency: Currency;
+  readonly amount: bigint;
 }
 
 export interface ReserveClaim extends FundAllowance {
-  claimId: string;
+  readonly claimId: string;
 }
 
 export interface LedgerDeps {
-  repo: LedgerRepository;
+  readonly repo: LedgerRepository;
   /** Id generator, injected by the composition root so this layer stays free of platform APIs. */
-  newId: () => string;
+  readonly newId: () => string;
 }
 
-const uniqueSorted = (values: string[]): string[] => [...new Set(values)].toSorted();
+export interface Ledger {
+  /** Posts any balanced set of entries once per idempotency key. `request` is validated first. */
+  postTransaction(request: unknown): Promise<PostResult>;
+  /** `AllowanceFunded`: credit `authorized` against the system `source`. */
+  fundAllowance(cmd: FundAllowance): Promise<PostResult>;
+  /** Sets aside `amount` for a claim; refused when it would push `unused` below zero. */
+  reserveClaim(cmd: ReserveClaim): Promise<PostResult>;
+  periodSummary(scope: string): Promise<PeriodSummary>;
+}
 
-export function createLedger({ repo, newId }: LedgerDeps) {
+export function createLedger({ repo, newId }: LedgerDeps): Ledger {
   /**
    * The only way entries reach the journal. Every posting, whatever its kind:
-   * 1. validates the entries (L2),
-   * 2. locks each touched scope in sorted order (no deadlock, and the cap check below cannot
+   * 1. is already validated and copied (see `postTransaction`),
+   * 2. locks each touched scope in one fixed order (no deadlock, and the cap check below cannot
    *    interleave with another writer of the same scope),
    * 3. claims the idempotency key once (L3),
    * 4. writes, then re-derives `unused` per scope and rolls everything back if one went negative.
@@ -45,9 +55,8 @@ export function createLedger({ repo, newId }: LedgerDeps) {
    * repository starts every unit of work at that level.
    */
   async function post(tx: LedgerTx, request: PostingRequest): Promise<PostResult> {
-    assertBalanced(request.entries);
-    const scopes = uniqueSorted(request.entries.map((e) => e.account.scope));
-    for (const scope of scopes) await tx.lockScope(scope);
+    const scopes = touchedScopes(request.entries);
+    await tx.lockScopes(scopes);
 
     const hash = requestHash(request);
     const txnId = newId();
@@ -71,51 +80,55 @@ export function createLedger({ repo, newId }: LedgerDeps) {
     return { status: 'created', txnId };
   }
 
-  const postTransaction = (request: PostingRequest): Promise<PostResult> =>
-    repo.withTransaction((tx) => post(tx, request));
+  // Validation and the balance rule run first, once, before a connection is taken: a bad request
+  // never uses the pool, and the copy made here is what gets posted even if the caller changes
+  // its own array while the posting waits for a connection or a lock.
+  const postTransaction: Ledger['postTransaction'] = async (input) => {
+    const request = parsePostingRequest(input);
+    assertBalanced(request.entries);
+    return repo.withTransaction((tx) => post(tx, request));
+  };
 
-  /** `AllowanceFunded`: credit `authorized` against the system `source`. */
-  const fundAllowance = (cmd: FundAllowance): Promise<PostResult> =>
-    postTransaction({
-      idempotencyKey: cmd.idempotencyKey,
-      kind: 'fund',
-      claimId: null,
-      currency: cmd.currency,
-      entries: [
-        { account: { scope: cmd.scope, kind: 'source' }, direction: 'debit', amount: cmd.amount },
-        {
-          account: { scope: cmd.scope, kind: 'authorized' },
-          direction: 'credit',
-          amount: cmd.amount,
-        },
-      ],
-    });
+  return {
+    postTransaction,
 
-  /** Sets aside `amount` for a claim; refused when it would push `unused` below zero. */
-  const reserveClaim = (cmd: ReserveClaim): Promise<PostResult> =>
-    postTransaction({
-      idempotencyKey: cmd.idempotencyKey,
-      kind: 'reserve',
-      claimId: cmd.claimId,
-      currency: cmd.currency,
-      entries: [
-        {
-          account: { scope: cmd.scope, kind: 'reserved' },
-          direction: 'debit',
-          amount: cmd.amount,
-        },
-        {
-          account: { scope: cmd.scope, kind: 'source' },
-          direction: 'credit',
-          amount: cmd.amount,
-        },
-      ],
-    });
+    fundAllowance: (cmd) =>
+      postTransaction({
+        idempotencyKey: cmd.idempotencyKey,
+        kind: 'fund',
+        claimId: null,
+        currency: cmd.currency,
+        entries: [
+          { account: { scope: cmd.scope, kind: 'source' }, direction: 'debit', amount: cmd.amount },
+          {
+            account: { scope: cmd.scope, kind: 'authorized' },
+            direction: 'credit',
+            amount: cmd.amount,
+          },
+        ],
+      }),
 
-  const periodSummary = (scope: string): Promise<PeriodSummary> =>
-    repo.withTransaction(async (tx) => summarize(await tx.scopeTotals(scope)));
+    reserveClaim: (cmd) =>
+      postTransaction({
+        idempotencyKey: cmd.idempotencyKey,
+        kind: 'reserve',
+        claimId: cmd.claimId,
+        currency: cmd.currency,
+        entries: [
+          {
+            account: { scope: cmd.scope, kind: 'reserved' },
+            direction: 'debit',
+            amount: cmd.amount,
+          },
+          {
+            account: { scope: cmd.scope, kind: 'source' },
+            direction: 'credit',
+            amount: cmd.amount,
+          },
+        ],
+      }),
 
-  return { postTransaction, fundAllowance, reserveClaim, periodSummary };
+    periodSummary: (scope) =>
+      repo.withTransaction(async (tx) => summarize(await tx.scopeTotals(scope))),
+  };
 }
-
-export type Ledger = ReturnType<typeof createLedger>;

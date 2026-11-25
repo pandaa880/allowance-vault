@@ -155,3 +155,6 @@ docs/                       design docs, ADRs, threat model, invariants, build l
   the user changed, why).
 - Public text (READMEs, PRs, posts) never contains the user's wallet addresses, balances or tx
   hashes. The guard hook enforces this for gh/git publishing.
+- **TypeScript tests** live in a mirrored `test/` tree per package (not colocated): they need a real Postgres and shared helpers, and the layers (`domain`, `application`, `infrastructure`) are tested at different levels. This is the recorded exception to the global "colocate tests" rule.
+- **SQL conventions** (from the PR 1 database review): every statement is a named constant in `infrastructure/pg/queries.ts`; tables are always schema-qualified (`ledger.`); every PL/pgSQL function pins `SET search_path = pg_catalog, pg_temp`; every constraint has an explicit name; an app-level invariant ("X never mixes Y") must also be a database constraint, or the code says why it cannot be; rows read back are parsed with zod, never trusted through `query<T>()`; the TypeScript value lists and the SQL CHECK lists are tied together by a test.
+- **Gates** before any PR: `pnpm run typecheck`, `pnpm run lint` (type-aware), `pnpm run format:check`, `pnpm test` (needs `docker compose up -d --wait`).

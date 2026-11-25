@@ -29,3 +29,13 @@ export class InvalidAmount extends Error {
 export class CurrencyMismatch extends Error {
   override readonly name = 'CurrencyMismatch';
 }
+
+/** A request field fails its format rule (empty scope, oversized key, malformed claim id, ...). */
+export class InvalidRequest extends Error {
+  override readonly name = 'InvalidRequest';
+}
+
+/** Another writer held a lock past the timeout. Safe to retry: nothing was written. */
+export class LockTimeout extends Error {
+  override readonly name = 'LockTimeout';
+}
