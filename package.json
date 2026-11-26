@@ -3,9 +3,17 @@
   "private": true,
   "packageManager": "pnpm@12.6.0",
   "engines": {
-    "node": ">=24"
+    "node": ">=24 <25"
   },
   "scripts": {
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "oxlint --type-aware packages",
+    "format:check": "oxfmt --check packages"
+  },
+  "devDependencies": {
+    "oxfmt": "0.79.0",
+    "oxlint": "1.94.0",
+    "oxlint-tsgolint": "7.0.2008"
   }
 }

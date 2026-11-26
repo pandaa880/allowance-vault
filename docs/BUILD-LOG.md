@@ -3,6 +3,21 @@
 One entry per working session: goal, what AI did, what you changed by hand and why, what you
 learned. Newest first. Keep real numbers only.
 
+## 2026-11-24 — M0 setup and ledger schema (PR 1)
+- **Goal:** installs, repo, then `packages/ledger`: schema, idempotent posting, first tests.
+- **AI (Claude Code):** installed the Temporal CLI; scaffolded `ledger`, `payout-workflow`, `mock-partner` with
+  pnpm; created the public repo; wrote plan `01-ledger-schema` and, after approval, the ledger in
+  clean-architecture layers (`domain` pure, `application` use cases + ports, `infrastructure` pg adapter and
+  SQL migrations), `tsconfig.base.json` and a `docker compose` Postgres for tests.
+- **Decided (user):** Postgres client = `pg` (ADR 0012 addendum); plain `.sql` migrations; `docker compose` test DB.
+- **Review:** independent `reviewer` agent (Opus) returned CHANGES_REQUESTED: 4 major, several minor. AI fixed them: one guarded posting path for every posting (cap check on generic posts too), READ COMMITTED pinned, TRUNCATE and `accounts` guarded, closed-transaction guard, per-currency balance, sorted account upsert, per-scope currency check, destroy client on failed ROLLBACK, `newId` injected. Not fixed, recorded: DB role separation (ADR 0012 addendum, BACKLOG).
+- **Queries:** all SQL moved to named constants in `infrastructure/pg/queries.ts`, parameter builders in `params.ts` (pure, unit-tested); a test fails if inline SQL returns.
+- **Second round (2026-11-25), two more independent audits:** a Postgres-expert review and a review against the TypeScript guidelines, both CHANGES_REQUESTED, no critical bugs. AI made the schema changes recorded in the ADR 0012 addendum (`ledger` schema with pinned `search_path`, currency enforced per scope by the database, `xid8` closed-transaction guard, per-transaction balance check, guards that survive replica mode, timeouts and bounded retry, lock keys taken in key order, two-int migration lock) and the TypeScript ones (zod validation of requests and rows, `readonly` contracts, one value list shared with the SQL CHECKs, fast-check properties for `summarize` and `requestHash`, type-aware lint now actually running after installing `oxlint-tsgolint`). Tests found two things on the way: a lock-key query that sorted as text, and validation that ran too late to snapshot the caller's array. Both fixed.
+- **Verified by running, not only by reading:** replayed the temp-table shadowing attack on a copy of the guard function without the pinned `search_path` (attack worked: 4 entries) and on the real migration (blocked: 2 entries); removing the scope lock, or making it session-level, makes the concurrency and lock tests fail.
+- **Decided (user):** defaults for all seven audit questions (installs approved: `oxlint-tsgolint`, `@types/node`; scopes table and `ledger` schema in PR 1; text account id kept; `Result` unions in a follow-up PR; branded types later; stay in the worktree).
+- **Tests:** 188 pass on Node 24 after ADR 0013 (Node 24 for now, decided by the user; exact dependency versions with `saveExact`; `/node` corrected from 26 to 24; install scripts off, backed by a Temporal worker spike that ran on Node 24 and 26). Before that, 188 pass (DeepSeek v4 Flash and Pro reviews via `pi`, headless, no tools: both APPROVE; Flash found an unbounded wait for the migration lock and a missing 2^63-1 round-trip test, both fixed). Before that, 185 pass (tests reuse the production SQL constants; test-only SQL in `test/support/sql.ts`; the inline-SQL scan now covers test files too). Before that, 153 pass (domain unit and property tests, parameter and failure-path unit tests with a scripted pool, integration tests against Postgres 17 including `migrate()` into a fresh database). Type-aware oxlint, oxfmt and tsc clean.
+- **By hand:** `[YOU: what you reviewed or changed]`
+
 ## 2026-11-23 — OQ-01 discussion: how real payout partners behave
 - **Goal:** ground the mock partner and OQ-01 (which record says money left) in real partner behaviour.
 - **AI (Claude Code):** explained strong API partners (atomic idempotency keys, status endpoint) vs weak

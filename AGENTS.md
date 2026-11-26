@@ -132,7 +132,7 @@ docs/                       design docs, ADRs, threat model, invariants, build l
 - Off-chain (slice 1, v2+): TypeScript everywhere; Temporal (TypeScript SDK, local dev server only);
   Postgres (double-entry ledger, integer base units); zod; vitest + fast-check. Docker runtime needed.
 - Web/clients (when added): TypeScript, TanStack Start + TanStack DB + Electric (pre-1.0: pin
-  versions), `@solana/kit`, pnpm 12.6, Node 24, **oxlint + oxfmt** (not ESLint/Prettier/Biome), vitest.
+  versions), `@solana/kit`, pnpm 12.6, Node 24 (ADR 0013: exact dependency versions, move to 26 when Temporal and the host support it), **oxlint + oxfmt** (not ESLint/Prettier/Biome), vitest.
 - **Ask before installing** any tool, crate or npm package, including `anchor build` the first
   time (it downloads crates).
 - Load the `solana-dev` skill for Solana work. Check Squads, Kora, subscriptions and wallet APIs
@@ -155,3 +155,6 @@ docs/                       design docs, ADRs, threat model, invariants, build l
   the user changed, why).
 - Public text (READMEs, PRs, posts) never contains the user's wallet addresses, balances or tx
   hashes. The guard hook enforces this for gh/git publishing.
+- **TypeScript tests** live in a mirrored `test/` tree per package (not colocated): they need a real Postgres and shared helpers, and the layers (`domain`, `application`, `infrastructure`) are tested at different levels. This is the recorded exception to the global "colocate tests" rule.
+- **SQL conventions** (from the PR 1 database review): every statement is a named constant in `infrastructure/pg/queries.ts` (tests reuse those, and keep test-only inspection and attack SQL in `test/support/sql.ts`; a scan test fails on inline SQL anywhere else); tables are always schema-qualified (`ledger.`); every PL/pgSQL function pins `SET search_path = pg_catalog, pg_temp`; every constraint has an explicit name; an app-level invariant ("X never mixes Y") must also be a database constraint, or the code says why it cannot be; rows read back are parsed with zod, never trusted through `query<T>()`; the TypeScript value lists and the SQL CHECK lists are tied together by a test.
+- **Gates** before any PR: `pnpm run typecheck`, `pnpm run lint` (type-aware), `pnpm run format:check`, `pnpm test` (needs `docker compose up -d --wait`).

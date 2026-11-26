@@ -1,6 +1,13 @@
 packages:
   - "app"
   - "packages/*"
+
+# New dependencies are written with exact versions (no ^ or ~). Upgrades are deliberate,
+# reviewed changes, not something an install does on its own (see ADR 0013).
+saveExact: true
+
+# Dependency install scripts stay off. A Temporal worker was run end to end on Node 24 and 26
+# with both of these blocked (2026-11-26), so neither is needed. Revisit if a worker fails.
 allowBuilds:
-  '@swc/core': set this to true or false
-  protobufjs: set this to true or false
+  '@swc/core': false
+  protobufjs: false
