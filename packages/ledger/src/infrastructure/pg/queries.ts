@@ -82,6 +82,11 @@ export const migrationQueries = {
   /** $1 timeout. Transaction-local: an ALTER waiting for its exclusive lock queues every writer
    * behind it, so it must give up quickly instead. */
   setLockTimeout: "SELECT set_config('lock_timeout', $1, true)",
+  /** $1 timeout. Session-level, for the steps before the per-file transactions: waiting for the
+   * migration lock and creating the bookkeeping table. Without it a second migrator (a CI retry,
+   * a script run twice) would wait forever. Reset before the client goes back to the pool. */
+  setSessionLockTimeout: "SELECT set_config('lock_timeout', $1, false)",
+  resetLockTimeout: 'RESET lock_timeout',
   /** $1 namespace, $2 key. The two-int form is a separate keyspace from the single-bigint locks
    * the ledger takes per scope. Session-level, so it needs a direct (non-pooled) connection. */
   lock: 'SELECT pg_advisory_lock($1::int, $2::int)',

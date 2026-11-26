@@ -55,6 +55,19 @@ describe('migrate() on an empty database', () => {
     await fresh.query(inspect.unlockAll);
   });
 
+  it('gives up instead of waiting forever when another migrator holds the lock', async () => {
+    const holder = await fresh.connect();
+    try {
+      await holder.query(migrationQueries.lock, [...MIGRATION_LOCK]);
+      await expect(migrate(fresh, { lockWaitTimeout: '200ms' })).rejects.toThrow(/lock timeout/i);
+    } finally {
+      await holder.query(migrationQueries.unlock, [...MIGRATION_LOCK]);
+      holder.release();
+    }
+    // Once the other migrator is gone, a run goes through again.
+    await expect(migrate(fresh)).resolves.toEqual([]);
+  });
+
   it('removes the public right to create temporary tables', async () => {
     expect(await countOf(fresh, inspect.publicTempGrants, [])).toBe(0);
   });

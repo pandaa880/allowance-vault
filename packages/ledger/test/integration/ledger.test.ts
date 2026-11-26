@@ -9,7 +9,7 @@ import {
   OverCommitted,
   UnbalancedTransaction,
 } from '../../src/domain/errors.js';
-import type { EntryInput, PostingRequest } from '../../src/domain/journal.js';
+import { MAX_AMOUNT, type EntryInput, type PostingRequest } from '../../src/domain/journal.js';
 import { createPgLedger, createPgPool, migrate } from '../../src/index.js';
 import { unitOfWork } from '../../src/infrastructure/pg/queries.js';
 import { databaseUrl } from '../support/db.js';
@@ -305,6 +305,12 @@ describe('base units', () => {
     const summary = await ledger.periodSummary(scope);
     expect(summary.authorized).toBe(big);
     expect(summary.unused).toBe(big);
+  });
+
+  it('5b. the largest amount a bigint column holds round-trips exactly', async () => {
+    const scope = scopeOf();
+    await fund(scope, MAX_AMOUNT);
+    expect((await ledger.periodSummary(scope)).authorized).toBe(MAX_AMOUNT);
   });
 });
 

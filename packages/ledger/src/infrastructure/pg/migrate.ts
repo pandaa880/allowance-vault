@@ -25,15 +25,24 @@ async function applyMigration(client: PoolClient, file: string): Promise<void> {
   }
 }
 
+export interface MigrateOptions {
+  /** Longest to wait for another migrator to finish before giving up (default 30s). */
+  readonly lockWaitTimeout?: string;
+}
+
 /**
  * Applies numbered `.sql` files in order, once each. Run it over a direct connection, not a
  * transaction-mode pooler: the session lock must stay on one server connection.
  */
-export async function migrate(pool: Pick<Pool, 'connect'>): Promise<string[]> {
+export async function migrate(
+  pool: Pick<Pool, 'connect'>,
+  { lockWaitTimeout = '30s' }: MigrateOptions = {},
+): Promise<string[]> {
   const client = await pool.connect();
   const applied: string[] = [];
   let failure: Error | undefined;
   try {
+    await client.query(migrationQueries.setSessionLockTimeout, [lockWaitTimeout]);
     await client.query(migrationQueries.lock, [...MIGRATION_LOCK]);
     await client.query(migrationQueries.createTable);
     const done = new Set(
@@ -57,6 +66,10 @@ export async function migrate(pool: Pick<Pool, 'connect'>): Promise<string[]> {
     } catch (error) {
       failure ??= asError(error);
     }
+    // The session-level timeout must not follow the connection back into the pool.
+    await client.query(migrationQueries.resetLockTimeout).catch((error: unknown) => {
+      failure ??= asError(error);
+    });
     // After any failure the session may still hold the lock: destroy the client, which makes the
     // server drop it, instead of returning it to the pool where every later migrate() would hang.
     client.release(failure);

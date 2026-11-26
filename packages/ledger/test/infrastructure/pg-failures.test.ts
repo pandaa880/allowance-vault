@@ -150,6 +150,23 @@ describe('migrate() releases the connection safely', () => {
     expect(released).toEqual([undefined]);
   });
 
+  it('bounds the wait for the migration lock, then resets the timeout before releasing', async () => {
+    const { pool, statements } = fakePool({
+      onQuery: (sql) =>
+        sql === migrationQueries.unlock
+          ? { rows: [{ pg_advisory_unlock: true }] }
+          : happyQueries(sql),
+    });
+    await migrate(pool, { lockWaitTimeout: '7s' });
+    const sqls = statements.map((s) => s.sql);
+    expect(sqls.slice(0, 2)).toEqual([
+      migrationQueries.setSessionLockTimeout,
+      migrationQueries.lock,
+    ]);
+    expect(statements[0]?.params).toEqual(['7s']);
+    expect(sqls.slice(-2)).toEqual([migrationQueries.unlock, migrationQueries.resetLockTimeout]);
+  });
+
   it('destroys the client when unlock reports the lock was not held', async () => {
     const { pool, released } = fakePool({
       onQuery: (sql) =>
