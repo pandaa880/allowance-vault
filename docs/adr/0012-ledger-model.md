@@ -79,6 +79,12 @@ receipt; the ledger waits for the statement before calling it final.
 | `PayoutFailed` | `failed` |
 | after `PartnerConfirmed` | `reversed` and post-settlement adjustments, shown as events, not new FR-12 states |
 
+**Post-settlement adjustments (decided 2026-11-23).** A return after `settled` is a new linked
+`post_settlement_adjustment` record; `settled` stays final. Reason codes: `bank_return`,
+`partner_recall`, `legal_hold` (a named placeholder, not built), `other`, with an opaque reference.
+It is posted automatically only from a partner's signed event or statement line; otherwise it is
+manual, needs approval, and leaves an audit entry.
+
 **Balanced in the database (FR-32).** A deferred constraint trigger checks that the entries of a
 journal transaction sum to zero per currency at commit.
 
