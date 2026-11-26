@@ -9,13 +9,13 @@ import {
   migrationQueries,
   unitOfWork,
 } from '../../src/infrastructure/pg/queries.js';
-import { databaseUrl } from './db.js';
+import { databaseUrl } from '../support/db.js';
+import { inspect, VALID_HASH } from '../support/sql.js';
 
 /** Each query is run on its own against real Postgres, so a typo or a wrong parameter order
  * fails here and not only through a use case. */
 
 const big = 2n ** 62n + 3n;
-const HASH = 'a'.repeat(64); // the hash column only accepts 64 lowercase hex characters
 
 let pool: Pool;
 beforeAll(async () => {
@@ -69,14 +69,10 @@ const lockKeys = async (scopes: string[]): Promise<string[]> => {
 };
 
 const read = (client: PoolClient) =>
-  client.query<{ lock: string; statement: string; idle: string }>(
-    `SELECT current_setting('lock_timeout') AS lock,
-            current_setting('statement_timeout') AS statement,
-            current_setting('idle_in_transaction_session_timeout') AS idle`,
-  );
+  client.query<{ lock: string; statement: string; idle: string }>(inspect.timeouts);
 
 describe('unitOfWork', () => {
-  it('begin starts READ COMMITTED even when the server default is stricter', async () => {
+  it('unitOfWork.begin starts READ COMMITTED even when the server default is stricter', async () => {
     const strict = new Pool({
       connectionString: databaseUrl,
       options: '-c default_transaction_isolation=serializable',
@@ -84,9 +80,7 @@ describe('unitOfWork', () => {
     const client = await strict.connect();
     try {
       await client.query(unitOfWork.begin);
-      const { rows } = await client.query<{ level: string }>(
-        "SELECT current_setting('transaction_isolation') AS level",
-      );
+      const { rows } = await client.query<{ level: string }>(inspect.isolation);
       expect(rows[0]?.level).toBe('read committed');
       await client.query(unitOfWork.rollback);
     } finally {
@@ -126,15 +120,12 @@ describe('ledgerQueries', () => {
     const probe = await pool.connect();
     // Asks, from another connection, whether the lock is free right now.
     const lockIsFree = async (): Promise<boolean | undefined> => {
-      await probe.query('BEGIN');
+      await probe.query(unitOfWork.begin);
       try {
-        const { rows } = await probe.query<{ free: boolean }>(
-          'SELECT pg_try_advisory_xact_lock($1::bigint) AS free',
-          [key],
-        );
+        const { rows } = await probe.query<{ free: boolean }>(inspect.tryXactLock, [key]);
         return rows[0]?.free;
       } finally {
-        await probe.query('ROLLBACK');
+        await probe.query(unitOfWork.rollback);
       }
     };
     try {
@@ -152,7 +143,7 @@ describe('ledgerQueries', () => {
     const key = randomUUID();
     const txn = newTxn(`scope-${randomUUID()}`);
     const claim = (c: PoolClient) =>
-      c.query(ledgerQueries.claimIdempotencyKey, [key, HASH, txn.id]);
+      c.query(ledgerQueries.claimIdempotencyKey, [key, VALID_HASH, txn.id]);
     // The key references its transaction row, which is checked at commit, so write it too.
     await inUnit(async (c) => {
       expect((await claim(c)).rowCount).toBe(1);
@@ -161,7 +152,7 @@ describe('ledgerQueries', () => {
     await inUnit(async (c) => {
       expect((await claim(c)).rowCount).toBe(0);
       const found = await c.query(ledgerQueries.findIdempotencyKey, [key]);
-      expect(found.rows[0]).toEqual({ request_hash: HASH, txn_id: txn.id });
+      expect(found.rows[0]).toEqual({ request_hash: VALID_HASH, txn_id: txn.id });
     });
   });
 
@@ -251,13 +242,9 @@ describe('migrationQueries', () => {
     try {
       await client.query(migrationQueries.begin);
       await client.query(migrationQueries.setLockTimeout, ['3s']);
-      const inside = await client.query<{ t: string }>(
-        "SELECT current_setting('lock_timeout') AS t",
-      );
+      const inside = await client.query<{ t: string }>(inspect.lockTimeout);
       await client.query(migrationQueries.commit);
-      const after = await client.query<{ t: string }>(
-        "SELECT current_setting('lock_timeout') AS t",
-      );
+      const after = await client.query<{ t: string }>(inspect.lockTimeout);
       expect([inside.rows[0]?.t, after.rows[0]?.t]).toEqual(['3s', '0']);
     } finally {
       client.release();

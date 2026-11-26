@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPgPool, migrate } from '../../src/index.js';
-import { databaseUrl, databaseUrlFor } from './db.js';
+import { migrationQueries } from '../../src/infrastructure/pg/queries.js';
+import { databaseUrl, databaseUrlFor } from '../support/db.js';
+import { countOf } from '../support/raw.js';
+import { admin, inspect, MIGRATION_LOCK } from '../support/sql.js';
 
 /**
  * The shared test database is already migrated after the first run, so on a warm container
@@ -11,28 +14,24 @@ import { databaseUrl, databaseUrlFor } from './db.js';
  */
 const dbName = `migrate_test_${randomUUID().replaceAll('-', '')}`;
 
-let admin: Pool;
+let adminPool: Pool;
 let fresh: Pool;
 
 beforeAll(async () => {
-  admin = createPgPool(databaseUrl);
-  await admin.query(`CREATE DATABASE ${dbName}`);
+  adminPool = createPgPool(databaseUrl);
+  await adminPool.query(admin.createDatabase(dbName));
   fresh = createPgPool(databaseUrlFor(dbName));
 });
 afterAll(async () => {
   await fresh.end();
-  await admin.query(`DROP DATABASE ${dbName} WITH (FORCE)`);
-  await admin.end();
+  await adminPool.query(admin.dropDatabase(dbName));
+  await adminPool.end();
 });
 
 describe('migrate() on an empty database', () => {
   it('applies every migration once, creating the ledger tables', async () => {
-    const applied = await migrate(fresh);
-    expect(applied).toEqual(['0001_init.sql']);
-    const { rows } = await fresh.query<{ table_name: string }>(
-      `SELECT table_name FROM information_schema.tables
-        WHERE table_schema = 'ledger' ORDER BY 1`,
-    );
+    expect(await migrate(fresh)).toEqual(['0001_init.sql']);
+    const { rows } = await fresh.query<{ table_name: string }>(inspect.ledgerTables);
     expect(rows.map((r) => r.table_name)).toEqual([
       'accounts',
       'idempotency_keys',
@@ -44,30 +43,25 @@ describe('migrate() on an empty database', () => {
 
   it('records what it applied, and a second run does nothing', async () => {
     expect(await migrate(fresh)).toEqual([]);
-    const { rows } = await fresh.query<{ name: string }>('SELECT name FROM schema_migrations');
+    const { rows } = await fresh.query<{ name: string }>(migrationQueries.listApplied);
     expect(rows.map((r) => r.name)).toEqual(['0001_init.sql']);
   });
 
   it('leaves the migration lock released, so the next run does not hang', async () => {
-    const { rows } = await fresh.query<{ free: boolean }>(
-      'SELECT pg_try_advisory_lock(7265, 1) AS free',
-    );
+    const { rows } = await fresh.query<{ free: boolean }>(inspect.tryMigrationLock, [
+      ...MIGRATION_LOCK,
+    ]);
     expect(rows[0]?.free).toBe(true);
-    await fresh.query('SELECT pg_advisory_unlock_all()');
+    await fresh.query(inspect.unlockAll);
   });
 
   it('removes the public right to create temporary tables', async () => {
-    const { rows } = await fresh.query<{ n: string }>(
-      `SELECT count(*) AS n FROM pg_database d, aclexplode(d.datacl) a
-        WHERE d.datname = current_database() AND a.grantee = 0 AND a.privilege_type = 'TEMPORARY'`,
-    );
-    expect(rows[0]?.n).toBe('0');
+    expect(await countOf(fresh, inspect.publicTempGrants, [])).toBe(0);
   });
 
   it('gives every trigger function a pinned search_path', async () => {
     const { rows } = await fresh.query<{ proname: string; proconfig: string[] | null }>(
-      `SELECT p.proname, p.proconfig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = 'ledger' ORDER BY 1`,
+      inspect.ledgerFunctions,
     );
     expect(rows.length).toBeGreaterThan(0);
     const unpinned = rows

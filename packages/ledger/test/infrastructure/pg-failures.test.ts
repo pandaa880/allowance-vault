@@ -107,7 +107,7 @@ describe('PgLedgerRepository retry and timeouts', () => {
   it('destroys a client whose ROLLBACK failed instead of pooling it', async () => {
     const { pool, released } = fakePool({
       onQuery: (sql) => {
-        if (sql === unitOfWork.rollback) throw new Error('rollback failed');
+        if (sql === unitOfWork.rollback) throw new Error('the rollback failed');
         return { rows: [], rowCount: 0 };
       },
     });
