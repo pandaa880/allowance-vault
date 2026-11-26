@@ -3,6 +3,16 @@
 One short entry per session or PR: the goal, what AI did, what was decided, and what was changed by
 hand. Details live in the ADRs and plans. Newest first.
 
+## 2026-11-26 — LiteSVM fix (PR 3) and ledger `Result` unions (PR 4)
+- **Goal:** make the template LiteSVM test load SBPF v3 builds; return expected ledger refusals
+  as values before the payout workflow uses the ledger.
+- **AI (Claude Code):** traced `InvalidAccountData` to litesvm 0.10 vs SBPF v3 and bumped the test
+  stack; redid PR 1b (the first local commit was lost with its worktree) with unit tests on a
+  fake repository.
+- **Decided (user):** redo 1b, split into two PRs, approve the litesvm 0.18.1 bump.
+- **By hand:** `[YOU: what you reviewed or changed]`
+- **Learned:** `[YOU: in your own words]`
+
 ## 2026-11-24 to 26 — Ledger package (PR 1, merged)
 - **Goal:** build `packages/ledger`, the double-entry ledger behind slice 1.
 - **AI (Claude Code):** set up the workspace and repo; wrote the ledger, its SQL schema and 188

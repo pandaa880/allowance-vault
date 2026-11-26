@@ -1,3 +1,20 @@
+import type { Currency } from './journal.js';
+
+/**
+ * Two kinds of failure, handled differently:
+ * - A refusal (`PostRejection`): the request is well formed, but the ledger's current state
+ *   forbids it. Nothing was written. Use cases return it as a value, so the caller has to decide
+ *   (compensate, ask the family, alert) instead of retrying blindly.
+ * - Everything else is thrown: a malformed request (`InvalidRequest`, `InvalidAmount`,
+ *   `UnbalancedTransaction`) is a caller bug, and an infrastructure failure (`LockTimeout`, pg
+ *   errors) is worth retrying. The classes below for refusals are only the signal that rolls the
+ *   database transaction back; they never leave the use case.
+ */
+export type PostRejection =
+  | { readonly kind: 'IdempotencyConflict'; readonly idempotencyKey: string }
+  | { readonly kind: 'OverCommitted'; readonly scope: string; readonly unusedAfter: bigint }
+  | { readonly kind: 'CurrencyMismatch'; readonly currency: Currency };
+
 export class UnbalancedTransaction extends Error {
   override readonly name = 'UnbalancedTransaction';
 }
@@ -28,6 +45,13 @@ export class InvalidAmount extends Error {
 
 export class CurrencyMismatch extends Error {
   override readonly name = 'CurrencyMismatch';
+  constructor(
+    /** The currency of the refused transaction. */
+    readonly currency: Currency,
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 /** A request field fails its format rule (empty scope, oversized key, malformed claim id, ...). */

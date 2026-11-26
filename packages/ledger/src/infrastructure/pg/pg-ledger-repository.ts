@@ -83,6 +83,7 @@ class PgLedgerTx implements LedgerTx {
     ]);
     if (mixed.rowCount) {
       throw new CurrencyMismatch(
+        txn.currency,
         `transaction ${txn.id} is in ${txn.currency} but a touched scope already holds another currency`,
       );
     }

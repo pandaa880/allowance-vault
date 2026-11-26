@@ -11,12 +11,14 @@ export {
   createLedger,
   type FundAllowance,
   type Ledger,
+  type PostOutcome,
   type PostResult,
   type ReserveClaim,
 } from './application/ledger.js';
 export type { LedgerRepository, LedgerTx } from './application/ports.js';
 export * from './domain/errors.js';
 export * from './domain/journal.js';
+export * from './domain/result.js';
 export { migrate } from './infrastructure/pg/migrate.js';
 export {
   createPgPool,
