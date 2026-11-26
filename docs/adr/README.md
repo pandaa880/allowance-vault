@@ -17,6 +17,7 @@ Write it when you decide, not after. Superseded ADRs stay, marked "Superseded by
 | [0010](0010-payout-receipts.md) | Payout receipts and partner attestation | proposed | 2026-11-11 |
 | [0011](0011-off-chain-payout-architecture.md) | Off-chain payout architecture (Temporal workflow, mock partner, idempotency keys) | accepted | 2026-11-24 |
 | [0012](0012-ledger-model.md) | Ledger model (double-entry, append-only, idempotency table, base units) | accepted | 2026-11-24 |
+| [0013](0013-node-runtime-and-dependency-versions.md) | Node runtime (24 now, 26 later) and exact dependency versions | accepted | 2026-11-26 |
 
 Planned after slice 1: FX quote expiry and who absorbs a rate move (slice 2); transaction landing
 and durable-nonce stance (slice 3). v2+ notes (2026-11-20) are appended as "Update" sections to

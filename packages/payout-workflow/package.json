@@ -6,14 +6,14 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@temporalio/activity": "^1.26.0",
-    "@temporalio/client": "^1.26.0",
-    "@temporalio/worker": "^1.26.0",
-    "@temporalio/workflow": "^1.26.0",
-    "zod": "^4.6.7"
+    "@temporalio/activity": "1.26.0",
+    "@temporalio/client": "1.26.0",
+    "@temporalio/worker": "1.26.0",
+    "@temporalio/workflow": "1.26.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "typescript": "^7.0.2",
-    "vitest": "^5.1.1"
+    "typescript": "7.0.2",
+    "vitest": "5.1.1"
   }
 }

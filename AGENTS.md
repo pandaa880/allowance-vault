@@ -132,7 +132,7 @@ docs/                       design docs, ADRs, threat model, invariants, build l
 - Off-chain (slice 1, v2+): TypeScript everywhere; Temporal (TypeScript SDK, local dev server only);
   Postgres (double-entry ledger, integer base units); zod; vitest + fast-check. Docker runtime needed.
 - Web/clients (when added): TypeScript, TanStack Start + TanStack DB + Electric (pre-1.0: pin
-  versions), `@solana/kit`, pnpm 12.6, Node 24, **oxlint + oxfmt** (not ESLint/Prettier/Biome), vitest.
+  versions), `@solana/kit`, pnpm 12.6, Node 24 (ADR 0013: exact dependency versions, move to 26 when Temporal and the host support it), **oxlint + oxfmt** (not ESLint/Prettier/Biome), vitest.
 - **Ask before installing** any tool, crate or npm package, including `anchor build` the first
   time (it downloads crates).
 - Load the `solana-dev` skill for Solana work. Check Squads, Kora, subscriptions and wallet APIs
