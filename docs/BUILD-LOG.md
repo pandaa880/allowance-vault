@@ -1,107 +1,61 @@
 # Build log
 
-One entry per working session: goal, what AI did, what you changed by hand and why, what you
-learned. Newest first. Keep real numbers only.
+One short entry per session or PR: the goal, what AI did, what was decided, and what was changed by
+hand. Details live in the ADRs and plans. Newest first.
 
-## 2026-11-24 — M0 setup and ledger schema (PR 1)
-- **Goal:** installs, repo, then `packages/ledger`: schema, idempotent posting, first tests.
-- **AI (Claude Code):** installed the Temporal CLI; scaffolded `ledger`, `payout-workflow`, `mock-partner` with
-  pnpm; created the public repo; wrote plan `01-ledger-schema` and, after approval, the ledger in
-  clean-architecture layers (`domain` pure, `application` use cases + ports, `infrastructure` pg adapter and
-  SQL migrations), `tsconfig.base.json` and a `docker compose` Postgres for tests.
-- **Decided (user):** Postgres client = `pg` (ADR 0012 addendum); plain `.sql` migrations; `docker compose` test DB.
-- **Review:** independent `reviewer` agent (Opus) returned CHANGES_REQUESTED: 4 major, several minor. AI fixed them: one guarded posting path for every posting (cap check on generic posts too), READ COMMITTED pinned, TRUNCATE and `accounts` guarded, closed-transaction guard, per-currency balance, sorted account upsert, per-scope currency check, destroy client on failed ROLLBACK, `newId` injected. Not fixed, recorded: DB role separation (ADR 0012 addendum, BACKLOG).
-- **Queries:** all SQL moved to named constants in `infrastructure/pg/queries.ts`, parameter builders in `params.ts` (pure, unit-tested); a test fails if inline SQL returns.
-- **Second round (2026-11-25), two more independent audits:** a Postgres-expert review and a review against the TypeScript guidelines, both CHANGES_REQUESTED, no critical bugs. AI made the schema changes recorded in the ADR 0012 addendum (`ledger` schema with pinned `search_path`, currency enforced per scope by the database, `xid8` closed-transaction guard, per-transaction balance check, guards that survive replica mode, timeouts and bounded retry, lock keys taken in key order, two-int migration lock) and the TypeScript ones (zod validation of requests and rows, `readonly` contracts, one value list shared with the SQL CHECKs, fast-check properties for `summarize` and `requestHash`, type-aware lint now actually running after installing `oxlint-tsgolint`). Tests found two things on the way: a lock-key query that sorted as text, and validation that ran too late to snapshot the caller's array. Both fixed.
-- **Verified by running, not only by reading:** replayed the temp-table shadowing attack on a copy of the guard function without the pinned `search_path` (attack worked: 4 entries) and on the real migration (blocked: 2 entries); removing the scope lock, or making it session-level, makes the concurrency and lock tests fail.
-- **Decided (user):** defaults for all seven audit questions (installs approved: `oxlint-tsgolint`, `@types/node`; scopes table and `ledger` schema in PR 1; text account id kept; `Result` unions in a follow-up PR; branded types later; stay in the worktree).
-- **Tests:** 188 pass on Node 24 after ADR 0013 (Node 24 for now, decided by the user; exact dependency versions with `saveExact`; `/node` corrected from 26 to 24; install scripts off, backed by a Temporal worker spike that ran on Node 24 and 26). Before that, 188 pass (DeepSeek v4 Flash and Pro reviews via `pi`, headless, no tools: both APPROVE; Flash found an unbounded wait for the migration lock and a missing 2^63-1 round-trip test, both fixed). Before that, 185 pass (tests reuse the production SQL constants; test-only SQL in `test/support/sql.ts`; the inline-SQL scan now covers test files too). Before that, 153 pass (domain unit and property tests, parameter and failure-path unit tests with a scripted pool, integration tests against Postgres 17 including `migrate()` into a fresh database). Type-aware oxlint, oxfmt and tsc clean.
+## 2026-11-24 to 26 — Ledger package (PR 1, merged)
+- **Goal:** build `packages/ledger`, the double-entry ledger behind slice 1.
+- **AI (Claude Code):** set up the workspace and repo; wrote the ledger, its SQL schema and 188
+  tests; ran independent reviews (Opus reviewers, a Postgres audit, DeepSeek via `pi`) and fixed
+  their findings.
+- **Decided (user):** `pg` with plain SQL migrations, and the schema hardening from the audits
+  (ADR 0012 addenda); Node 24 with exact dependency versions (ADR 0013).
+- **By hand:** `[YOU: what you reviewed or changed]`
+- **Learned:** `[YOU: in your own words]`
+
+## 2026-11-23 to 24 — Open questions answered, ADRs 0011 and 0012
+- **Goal:** answer the blocking open questions before the payout and ledger ADRs.
+- **AI (Claude Code):** explained how real payout partners behave (general knowledge, no partner docs
+  checked); drafted ADRs 0011 and 0012; aligned requirements, invariants and ADRs 0007 and 0010.
+- **Decided (user):** answers to OQ-01 to 05, 07, 14, 17 and 20 (in `09-open-questions.md`); a mock
+  partner with strong and weak modes; ADRs 0011 and 0012 accepted.
+- **Note:** the retention defaults (ledger 8 years) are not legal advice; a CA must confirm them.
 - **By hand:** `[YOU: what you reviewed or changed]`
 
-## 2026-11-23 — OQ-01 discussion: how real payout partners behave
-- **Goal:** ground the mock partner and OQ-01 (which record says money left) in real partner behaviour.
-- **AI (Claude Code):** explained strong API partners (atomic idempotency keys, status endpoint) vs weak
-  bank/PA-CB integrations (no key, enquiry is eventually consistent, async returns). From general
-  knowledge, not checked against any named partner's docs.
-- **Decided (user):** mock partner ships both a strong and a weak mode in slice 1.
-- **Decided (user):** OQ-01 direction: after an unknown outcome, block the payout until the partner is asked (enquire first, no blind retry).
-- **Decided (user):** own mock partner with a Stripe-convention API (Idempotency-Key header, saved-response replay, key expiry, `metadata`, `payout.*` events, `POST /payouts`, `GET /payouts/{id}`, signed webhooks) plus a bank-style weak mode. Stripe is a style guide, not a dependency; no real Stripe in slice 1; no connected-account onboarding or two-step payout until a slice needs it. Port stays narrow and partner-neutral with a capability descriptor (idempotencyKey, keyTtl, enquiryConsistency, eventSource, recipientOnboarding, steps). Optional Stripe test-mode adapter later (slice 2 or 4).
-- **Decided (user):** OQ-02 direction: the intent id is generated by the server (opaque UUID), not the browser. Find-or-create on a natural key so a re-tap or post-crash retry returns the same intent. **Natural key (decided):** (vault, recipient, currency, amount, period), open intents only (partial unique index); amount IN, route OUT (a failed partner route retried via wallet stays the same intent). Excluded because they change on retry: time, request id, memo, device. Cap enforced atomically with the reserve as the backstop. Security reasoning: client ids are untrusted (forgery, squatting, IDOR), so unique on (user, id) and ownership checks anyway; the id never grants authority.
-- **Decided (user):** OQ-03 direction: `ClaimReleased` source contract is at-least-once, unordered, gaps and late arrival possible. Fake source can inject duplicates, delays, reordering AND lost events from slice 1. Dedupe in two independent places: Temporal workflow id derived from `claimId` (second start rejected) and a unique key on the claim row. A duplicate event for a running workflow is logged and ignored. Gap detection (noticing a claim never released) is slice 2 reconciliation; slice 1 only proves a dropped event causes no payout and a later redelivery pays once.
-- **Decided (user):** OQ-20 mock partner contract (all proposed defaults accepted). Endpoints: `POST /payouts`, `GET /payouts/{id}`, `GET /payouts?reference=<claimId>` (quotes are slice 2). Strong mode = Stripe v1 semantics: `Idempotency-Key` up to 255 chars; same key + same body replays saved first response (incl. 5xx once execution began); same key + different body = `409 idempotency_conflict`; duplicate while first in flight = `409 in_progress` with retry hint; validation errors not saved; key expiry configurable, default 24h. Weak mode: no key honored, dedupe by `reference` only and can fail; enquiry may return `not_found` for a configurable delay; knob to forget a key/reference. Status values `pending | paid | failed | reversed` (`reversed` used from slice 2); `failed` is final, `reversed` is a separate state after `paid`. Webhooks: `payout.paid`, `payout.failed` (later `payout.reversed`), at-least-once, unordered, duplicated; retries with exponential backoff up to 3 days (configurable); HMAC-SHA256 over raw body + timestamp in a header; reject timestamps older than 5 minutes. Timeout = partner debits then drops or never answers; client timeout is a workflow setting. Receipt: signed by the PARTNER (corrected 2026-11-23, was "ours"; matches FR-26 and ADR 0010); amounts as strings in base units with explicit currency, sorted keys, fixed field order so the hash is stable.
-- **Decided (user):** OQ-04 direction: conservation rule is worded as flows, not "held". Every authorized amount is in exactly one state: reserved, released (paid out) or refunded; `refunded` is its own account (not just back to unused). Checked per claim (each claim's reserved amount ends in exactly one of released or refunded) AND per period (authorized = reserved + released + refunded + unused; this is what the cap needs). "Funded" is an event (`AllowanceFunded(amount)`) that references the on-chain limit, not a balance. Funds sit in the sender-owned Squads smart account with limits (we never hold funds; ledger records reservations against a limit, not balances). This is a lean for D1 (option 3 vs 5): the final pick stays in slice 3 / ADR 0002; own vault PDA would be devnet test tokens only if chosen. Whether a refund restores the period cap is still open (OQ-05).
-- **Decided (user):** OQ-05 cap rule: restore the period cap on a failed payout (money never left); on a reversal after paid, restore only once the refund has settled in the ledger (money visibly returned, conservation stays clean). Proposed, not yet confirmed: final states `failed`, `settled`, `reversed`; `paid` may move to `reversed`. Decided: a restored cap lands in the CURRENT period (the one when the refund settles), so closed periods stay immutable (fits append-only L2).
-- **Decided (user):** OQ-07 FX: quote is bound to the claim BEFORE USDC leaves (family confirms an exact INR amount); quote expires; if it expires or the rate moves past tolerance before the payout starts, hold the claim and ask the family to re-confirm (L5). Tolerance = 1%. Once the payout has started on a valid quote, the sender carries any later rate move (the family gets the promised INR). Re-confirmation is only possible before release, so the workflow order is quote, check, reserve, pay. Open: quote lifetime in seconds and worst-case gap per contributor (finality, indexer lag, workflow, partner rail) `[YOU]`.
-- **Decided (user):** FX risk is a versioned `QuotePolicy` (decisions only: proceed | hold | requote | ledger adjustment), configured PER ROUTE (wallet vs partner). Policy id, version and config are snapshotted on the claim when the quote is bound, so in-flight claims keep their rules. Core (not policy) enforces conservation: whoever carries a move, the difference is an explicit `fx_adjustment` ledger entry. Slice 2 builds the interface with one policy (bound-quote, sender carries, 1%); no second policy or editor until needed. Lock point moves only within declared workflow shapes.
-- **Decided (user):** OQ-14 rule changes: tightening (lower cap, shorter period, remove payee, revoke key, pause) takes effect instantly; loosening (raise cap, add payee, add key, extend period, resume, remove guardian; mixed changes count as loosening) waits 1 day, configurable per environment (hosted demo uses minutes). Sender and guardian can each cancel a pending loosening. The guardian can undo a lockout instantly. Pending loosenings are visible to everyone with a cancel action. Each claim records the rule version active at the time (same snapshot idea as the FX policy). Open (my suggestion, not yet confirmed): an instant guardian undo may only restore the previous rule version, never go beyond it, so a compromised guardian cannot loosen instantly.
-- **Decided (user):** OQ-17 data handling: the ledger and chain hold only opaque ids, amounts and states; no names, phones, bank references, free-text memos or personal hashes. Personal data lives in a separate erasable store keyed by the opaque person id. The partner holds the bank reference; we keep only a partner-side token. Deletion = erase the mutable row (pseudonymization; ledger entries stay). Retention period: PLACEHOLDER `[CA/lawyer to fill]`, no legal period stated in docs. Test: no ledger row, receipt or log line contains a name, phone or bank reference. Hosted demo uses fake data, labelled on screen.
-- **AI (Claude Code, delegate skill):** drafted ADR 0011 (payout architecture) and ADR 0012 (ledger model), both proposed, and linked them in `adr/README.md`. Delegated two read-only jobs to Haiku agents: an ADR format/cross-link survey and a consistency review of the drafts against this log. Fixed review findings (quote step in the diagram, `unused` and `fx_adjustment` in the period identity, DB balance trigger, states mapping, proposed markers). Rewrote L4 and L5 in `05-invariants.md` and `08-requirements.md` (FR-24, line 117) to match decisions; L5 now applies before release.
-- **Decided (user):** partner signs the receipt (fixes the OQ-20 default). FR-4, FR-5 and ADR 0007 updated to OQ-14: tightening instant, loosening after 1 day, guardian and sender can cancel. ADR 0011 and 0012 aligned.
-- **Checked:** Stripe docs (idempotency, cross-border payouts, India restrictions), Deel and Skydo public pages. India payout support for all three unconfirmed.
-- **Decided (user):** defaults accepted: "not found" window 15 minutes per partner (mock; seconds in tests), quote lifetime 60 seconds per route, both configurable. Not industry standards; no real partner checked.
-- **Decided (user):** final states `failed`, `settled`, `reversed` accepted; `paid` becomes `settled` through statement reconciliation (slice 2; slice 1 mock uses a short fixed window). Decided: option A, a reversal after `settled` is a new linked `post_settlement_adjustment` record (reason codes `bank_return | partner_recall | legal_hold | other`, opaque reference), `settled` stays final; `legal_hold` is a named placeholder, not built; auto-posted only from a partner's signed event or statement line, otherwise manual with approval and audit entry.
-- **Decided (user):** claim-state mapping accepted: `PartnerConfirmed` (signed receipt received) and `settled` (statement reconciled) are two separate steps; `Released` contains `reserved | payout_unknown | paid`; `reversed` and post-settlement adjustments are events, not new FR-12 states.
-- **Decided (user):** guardian undo of a lockout restores only the rule version in force before the first tightening of the current lockout, never beyond it; a mixed change cannot be undone instantly; sender is alerted and the audit view shows it. Updated ADR 0007 and FR-4.
-- **Decided (user):** loosening delay is 24 hours (down from 48h), applied mid-period; removing the guardian waits longer (length open, proposed 7 days, configurable). Cost noted in ADR 0007: shorter window to notice, guardian alert and cancel are the safety net.
-- **Decided (user):** receipts carry a `partnerToken` instead of `remittanceRef` (option A); bank reference stays at the partner; FR-26, ADR 0010 and ADR 0011 reworded. Guardian removal waits 7 days (configurable). Not changed: `../HANDOFF.md` handoff 1 (history) still shows `remittanceRef`.
-- **Decided (user, 2026-11-24):** on app reopen after a crash the open intent resumes automatically (answers the OQ-02 slice 3 question).
-- **Decided (user, 2026-11-24):** defaults accepted for the open rules: refund counting in the period cap (failed returns the reserve to unused at once; reversal posts released to refunded on settle, then a restore entry in the current period; cumulative `refunded` stays for audit) and the route-switch rule (switch only after the first route is definitely failed; built in slice 3). Placeholder unchanged: worst-case FX gap (slice 2).
-- **Decided (user, 2026-11-24):** retention suggested by Claude and set as a project default, not legal advice: ledger, receipts and partner events 8 years after the claim's final state; personal-data store erased on request or 12 months after the vault closes; logs 90 days. Basis: secondary commentary only (PMLA 5 years, Companies Act 8, RBI and tax 5 to 10; DPDP erasure yields to statutory retention); primary texts not read. A CA must confirm before real use.
-- **Decided (user, 2026-11-24):** ADR 0011 and ADR 0012 accepted. Open inside them: how refunds count in the per-period cap `[YOU]`, route-switch rule (proposed, backlog), worst-case FX gap (placeholder), retention period (placeholder). ADR 0007 and 0010 updates stay proposed.
-- **Done (2026-11-24):** OQ-01 answer dictated by the user and transcribed verbatim in `09-open-questions.md`. OQ-02 to 05, 07, 14, 17 and 20 done the same way (2026-11-24; OQ-07 question 1, the worst-case gap, is a placeholder until slice 2). All eight blocking questions are transcribed; OQ-07 question 1 stays a placeholder until slice 2.
-
 ## 2026-11-20 — Architecture review of the v2+ design, requirements, open questions
-- **Goal:** a written starting point: requirements, review findings and the gaps to close before
-  further architecture work.
-- **AI (Claude Code, architect-mentor skill in review mode):** reviewed the v2+ design and wrote 10
-  findings (R12–R21) onto the architecture page; wrote `08-requirements.md` (functional, non-functional,
-  per-slice acceptance, traceability) and `09-open-questions.md` (33 questions, a short system-design
-  lesson on each, suggested answer order). A fetch subagent read heirvault.xyz for a competitor
-  check (adjacent inheritance product; its site claims are inconsistent).
-- **Not done:** no architecture changes; no ADRs accepted; the questions are unanswered.
+- **Goal:** a written starting point: requirements, review findings and gaps to close.
+- **AI (Claude Code):** wrote review findings R12–R21, `08-requirements.md` and
+  `09-open-questions.md` (33 questions); checked one competitor (heirvault.xyz).
 - **By hand:** `[YOU: which questions you answered and what you decided]`
 - **Learned:** `[YOU: in your own words]`
 
 ## 2026-11-20 — Align project files with the v2+ plan
-- **Goal:** make every note, README and ADR agree with `PLAN-roles-projects-prep-2026-11.md` §3.
-- **AI (Claude Code):** read the plan and every project file; added v2+ update sections to ADRs
-  0002, 0006, 0009, 0010 (0003 already had one); updated READMEs, AGENTS.md (trust model, repo
-  map, toolchain), docs 02–05 (route kinds, off-chain invariants L1–L6), BRIEF, TASKS (milestone
-  overview) and the architecture page source. No code written, nothing installed.
-- **Decided (user, earlier):** 2026-11-17 build deep in 4 slices; 2026-11-20 v2+ (two routes, FX and
-  reversals, transaction landing, hosted devnet demo).
+- **Goal:** make every note, README and ADR agree with the plan (four slices, two routes).
+- **AI (Claude Code):** updated ADRs 0002, 0006, 0009, 0010, the READMEs, AGENTS.md, docs 02–05 and
+  the architecture page. No code written.
+- **Decided (user):** build deep in four slices (2026-11-17); two payout routes, FX and reversals,
+  hosted devnet demo (2026-11-20).
 - **By hand:** `[YOU: what you reviewed or changed]`
-- **Not done yet:** ADRs still proposed; ADRs 0011 and 0012 not written; diagrams in
-  `docs/04-accounts.md` not redrawn (banner only).
 
 ## 2026-11-13 — Squads Smart Account policy spike (code read)
 - **Goal:** can allowance rules run inside a Squads Smart Account instead of our own vault?
-- **AI (Claude Code):** shallow-cloned the Squads repo into a scratch folder and read the policy
-  code (nothing built or run); wrote the spike note and added option 5 (hybrid) to ADR 0002.
-- **Found:** four built-in policy types, no custom policy programs; hooks are the extension point;
-  native destinations allowlist, 30-day/custom periods, per-use cap, timelock (async only). Hook
-  signer is global → our hook must bind state to the smart account.
+- **AI (Claude Code):** read the Squads policy code (nothing built or run); wrote the spike note and
+  added option 5 (hybrid) to ADR 0002.
+- **Found:** no custom policy programs; hooks are the extension point, and our hook must bind its
+  state to the smart account.
 - **By hand:** `[YOU]`
 - **Learned:** `[YOU: in your own words]`
 
 ## 2026-11-11 — Architecture and sequence diagram v1
 - **Goal:** see the whole product before deciding D1–D6.
-- **AI (Claude Code):** drew the architecture flowchart and the end-to-end sequence diagram in
-  `docs/04-accounts.md` from the feasibility review's proposed D1–D6; checked the Solana dApp Store
-  publisher policy and submission rules for a possible Seeker build.
+- **AI (Claude Code):** drew the architecture and sequence diagrams in `docs/04-accounts.md`;
+  drafted ADRs 0001–0010 as proposed.
+- **Decided (user):** India stays primary; a US elder money guardian is a second demo scenario.
 - **By hand:** `[YOU: what you reviewed or changed]`
 - **Learned:** `[YOU: in your own words]`
-- **Decided (user):** India stays primary; US elder money guardian added as a second demo scenario
-  on the same program (scenario B diagram, role table and threat rows added).
-- **ADRs:** AI drafted 0001–0010 as *proposed*; India is the first payout adapter. Diagram v1.1
-  adds the adapter boundary, route registry, rent reserve and withdrawal path.
-- **Not done yet:** ADRs not accepted; claim state diagram and account tables.
 
 ## 2026-10-31 — Repo skeleton
 - **Goal:** set up the workspace and design-doc structure before any design decisions.
-- **AI (Claude Code):** ran `anchor init allowance-vault --no-install --no-git --package-manager pnpm
-  --template multiple --test-template litesvm`; wrote AGENTS.md (proposed trust model and
-  invariants), README, config (pnpm, oxlint, oxfmt, CI) and draft design docs from earlier research.
+- **AI (Claude Code):** ran `anchor init`; wrote AGENTS.md, the README, tooling config and draft
+  design docs from earlier research.
 - **By hand:** `[YOU: what you reviewed or changed]`
-- **Not done yet:** no `anchor build` (needs crate download approval), no git repo, program is still
-  the Anchor template sample.
