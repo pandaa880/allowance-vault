@@ -2,14 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  CurrencyMismatch,
-  IdempotencyConflict,
   InvalidRequest,
   LockTimeout,
-  OverCommitted,
   UnbalancedTransaction,
+  type PostRejection,
 } from '../../src/domain/errors.js';
 import { MAX_AMOUNT, type EntryInput, type PostingRequest } from '../../src/domain/journal.js';
+import { err, type Result } from '../../src/domain/result.js';
 import { createPgLedger, createPgPool, migrate } from '../../src/index.js';
 import { unitOfWork } from '../../src/infrastructure/pg/queries.js';
 import { databaseUrl } from '../support/db.js';
@@ -45,8 +44,14 @@ const scopeOf = () => `period-${randomUUID()}`;
 const rowCount = (scope: string) => countOf(pool, inspect.journalRowsInScope, [scope]);
 const keyCount = (key: string) => countOf(pool, inspect.keyRows, [key]);
 
-const fund = (scope: string, amount: bigint, idempotencyKey = randomUUID()) =>
-  ledger.fundAllowance({ idempotencyKey, scope, currency: 'USDC', amount });
+/** The value of a posting that went through; fails the test with the refusal otherwise. */
+const valueOf = <T>(outcome: Result<T, PostRejection>): T => {
+  if (!outcome.ok) throw new Error(`expected ok, got ${outcome.error.kind}`);
+  return outcome.value;
+};
+
+const fund = async (scope: string, amount: bigint, idempotencyKey = randomUUID()) =>
+  valueOf(await ledger.fundAllowance({ idempotencyKey, scope, currency: 'USDC', amount }));
 const reserve = (
   scope: string,
   amount: bigint,
@@ -132,7 +137,7 @@ describe('L2: every transaction balances', () => {
 
   it('1d. entries cannot be added to a transaction that is already committed', async () => {
     const scope = await fundedScope();
-    const { txnId } = await ledger.postTransaction(reserveRequest(scope, 5n));
+    const { txnId } = valueOf(await ledger.postTransaction(reserveRequest(scope, 5n)));
     await expect(
       inRawTransaction(pool, async (client) => {
         await insertEntries(client, txnId, scope, 1, 1);
@@ -149,7 +154,7 @@ describe('L2: every transaction balances', () => {
 
   it('1f. a table of the same name in the session cannot fool the guards', async () => {
     const scope = await fundedScope();
-    const { txnId } = await ledger.postTransaction(reserveRequest(scope, 5n));
+    const { txnId } = valueOf(await ledger.postTransaction(reserveRequest(scope, 5n)));
     const client = await pool.connect();
     try {
       await client.query(unitOfWork.begin);
@@ -238,7 +243,7 @@ describe('request validation', () => {
     const entries = [...reserveRequest(scope, 5n).entries];
     const posting = ledger.postTransaction({ ...base(), entries });
     entries.pop(); // the caller mutates the array while the posting is in flight
-    await expect(posting).resolves.toMatchObject({ status: 'created' });
+    await expect(posting).resolves.toMatchObject({ ok: true, value: { status: 'created' } });
   });
 });
 
@@ -246,8 +251,8 @@ describe('L3 and replay: idempotency keys', () => {
   it('3. same key and same request replays: zero new rows', async () => {
     const scope = await fundedScope();
     const request = reserveRequest(scope, 5n);
-    const first = await ledger.postTransaction(request);
-    const second = await ledger.postTransaction(request);
+    const first = valueOf(await ledger.postTransaction(request));
+    const second = valueOf(await ledger.postTransaction(request));
     expect(first.status).toBe('created');
     expect(second.status).toBe('replayed');
     expect(second.txnId).toBe(first.txnId);
@@ -257,18 +262,21 @@ describe('L3 and replay: idempotency keys', () => {
   it('4. same key with a different request is rejected (L3)', async () => {
     const scope = await fundedScope();
     const request = reserveRequest(scope, 5n);
-    await ledger.postTransaction(request);
+    valueOf(await ledger.postTransaction(request));
     const changed = { ...reserveRequest(scope, 6n), idempotencyKey: request.idempotencyKey };
-    await expect(ledger.postTransaction(changed)).rejects.toBeInstanceOf(IdempotencyConflict);
+    expect(await ledger.postTransaction(changed)).toEqual(
+      err({ kind: 'IdempotencyConflict', idempotencyKey: request.idempotencyKey }),
+    );
     expect(await rowCount(scope)).toBe(FUND_ROWS + 2);
   });
 
   it('4b. concurrent posts with one key: one created, the rest replay the same transaction', async () => {
     const scope = await fundedScope();
     const request = reserveRequest(scope, 5n);
-    const results = await Promise.all(
+    const outcomes = await Promise.all(
       Array.from({ length: 8 }, () => ledger.postTransaction(request)),
     );
+    const results = outcomes.map(valueOf);
     const created = results.filter((r) => r.status === 'created');
     expect(created).toHaveLength(1);
     for (const result of results) expect(result.txnId).toBe(created[0]?.txnId);
@@ -280,10 +288,10 @@ describe('L3 and replay: idempotency keys', () => {
     await fund(scope, 100n);
     const key = randomUUID();
     const claimId = randomUUID();
-    await reserve(scope, 60n, key, claimId);
-    await reserve(scope, 40n);
+    valueOf(await reserve(scope, 60n, key, claimId));
+    valueOf(await reserve(scope, 40n));
     expect((await ledger.periodSummary(scope)).unused).toBe(0n);
-    expect((await reserve(scope, 60n, key, claimId)).status).toBe('replayed');
+    expect(valueOf(await reserve(scope, 60n, key, claimId)).status).toBe('replayed');
   });
 
   it('4d. a rejected over-commit leaves no key behind, so the same request can succeed later', async () => {
@@ -291,10 +299,12 @@ describe('L3 and replay: idempotency keys', () => {
     await fund(scope, 100n);
     const key = randomUUID();
     const claimId = randomUUID();
-    await expect(reserve(scope, 150n, key, claimId)).rejects.toBeInstanceOf(OverCommitted);
+    expect(await reserve(scope, 150n, key, claimId)).toEqual(
+      err({ kind: 'OverCommitted', scope, unusedAfter: -50n }),
+    );
     expect(await keyCount(key)).toBe(0);
     await fund(scope, 100n);
-    expect((await reserve(scope, 150n, key, claimId)).status).toBe('created');
+    expect(valueOf(await reserve(scope, 150n, key, claimId)).status).toBe('created');
   });
 });
 
@@ -318,8 +328,10 @@ describe('period cap: unused never goes negative, on every posting path', () => 
   it('6. reserve beyond authorized is rejected and writes nothing', async () => {
     const scope = scopeOf();
     await fund(scope, 100n);
-    await reserve(scope, 60n);
-    await expect(reserve(scope, 41n)).rejects.toBeInstanceOf(OverCommitted);
+    valueOf(await reserve(scope, 60n));
+    expect(await reserve(scope, 41n)).toEqual(
+      err({ kind: 'OverCommitted', scope, unusedAfter: -1n }),
+    );
     expect(await ledger.periodSummary(scope)).toMatchObject({
       authorized: 100n,
       reserved: 60n,
@@ -330,18 +342,19 @@ describe('period cap: unused never goes negative, on every posting path', () => 
   it('6b. concurrent reserves cannot jointly over-commit', async () => {
     const scope = scopeOf();
     await fund(scope, 100n);
-    const attempts = await Promise.allSettled(Array.from({ length: 5 }, () => reserve(scope, 30n)));
-    expect(attempts.filter((a) => a.status === 'fulfilled')).toHaveLength(3);
-    const rejected = attempts.filter((a): a is PromiseRejectedResult => a.status === 'rejected');
-    for (const attempt of rejected) expect(attempt.reason).toBeInstanceOf(OverCommitted);
+    const attempts = await Promise.all(Array.from({ length: 5 }, () => reserve(scope, 30n)));
+    expect(attempts.filter((a) => a.ok)).toHaveLength(3);
+    for (const attempt of attempts.filter((a) => !a.ok)) {
+      expect(attempt).toMatchObject({ ok: false, error: { kind: 'OverCommitted', scope } });
+    }
     expect((await ledger.periodSummary(scope)).unused).toBe(10n);
   });
 
   it('6c. the generic postTransaction cannot bypass the cap', async () => {
     const scope = scopeOf();
     await fund(scope, 100n);
-    await expect(ledger.postTransaction(reserveRequest(scope, 1000n))).rejects.toBeInstanceOf(
-      OverCommitted,
+    expect(await ledger.postTransaction(reserveRequest(scope, 1000n))).toEqual(
+      err({ kind: 'OverCommitted', scope, unusedAfter: -900n }),
     );
     expect(await rowCount(scope)).toBe(FUND_ROWS); // only the fund entries
   });
@@ -349,7 +362,7 @@ describe('period cap: unused never goes negative, on every posting path', () => 
   it('6d. lowering authorized below what is reserved is rejected', async () => {
     const scope = scopeOf();
     await fund(scope, 100n);
-    await reserve(scope, 60n);
+    valueOf(await reserve(scope, 60n));
     const lower: PostingRequest = {
       idempotencyKey: randomUUID(),
       kind: 'lower-authorization',
@@ -360,7 +373,9 @@ describe('period cap: unused never goes negative, on every posting path', () => 
         { account: { scope, kind: 'source' }, direction: 'credit', amount: 50n },
       ],
     };
-    await expect(ledger.postTransaction(lower)).rejects.toBeInstanceOf(OverCommitted);
+    expect(await ledger.postTransaction(lower)).toEqual(
+      err({ kind: 'OverCommitted', scope, unusedAfter: -10n }),
+    );
     expect((await ledger.periodSummary(scope)).authorized).toBe(100n);
   });
 
@@ -372,13 +387,15 @@ describe('period cap: unused never goes negative, on every posting path', () => 
     try {
       const strictLedger = createPgLedger(strictPool);
       const scope = scopeOf();
-      await strictLedger.fundAllowance({
-        idempotencyKey: randomUUID(),
-        scope,
-        currency: 'USDC',
-        amount: 100n,
-      });
-      const attempts = await Promise.allSettled(
+      valueOf(
+        await strictLedger.fundAllowance({
+          idempotencyKey: randomUUID(),
+          scope,
+          currency: 'USDC',
+          amount: 100n,
+        }),
+      );
+      const attempts = await Promise.all(
         Array.from({ length: 5 }, () =>
           strictLedger.reserveClaim({
             idempotencyKey: randomUUID(),
@@ -389,7 +406,7 @@ describe('period cap: unused never goes negative, on every posting path', () => 
           }),
         ),
       );
-      expect(attempts.filter((a) => a.status === 'fulfilled')).toHaveLength(3);
+      expect(attempts.filter((a) => a.ok)).toHaveLength(3);
       expect((await strictLedger.periodSummary(scope)).unused).toBe(10n);
     } finally {
       await strictPool.end();
@@ -403,8 +420,9 @@ describe('locking', () => {
     await fund(a, 1000n);
     await fund(b, 1000n);
     const requests = Array.from({ length: 20 }, (_, i) => (i % 2 ? across(a, b) : across(b, a)));
-    const results = await Promise.allSettled(requests.map((r) => ledger.postTransaction(r)));
-    expect(results.map((r) => r.status)).toEqual(requests.map(() => 'fulfilled'));
+    // A deadlock would reject (pg 40P01 after the retries) and fail Promise.all.
+    const outcomes = await Promise.all(requests.map((r) => ledger.postTransaction(r)));
+    expect(outcomes.map((o) => o.ok)).toEqual(requests.map(() => true));
   });
 
   it('9. a posting gives up with LockTimeout when another writer holds the scope too long', async () => {
@@ -428,7 +446,7 @@ describe('locking', () => {
       holder.release();
     }
     // Once the holder is gone the same kind of posting goes through.
-    expect((await reserveOne()).status).toBe('created');
+    expect(valueOf(await reserveOne()).status).toBe('created');
   });
 });
 
@@ -436,15 +454,15 @@ describe('currency', () => {
   it('7. a scope never mixes currencies', async () => {
     const scope = scopeOf();
     await fund(scope, 100n);
-    await expect(
-      ledger.reserveClaim({
+    expect(
+      await ledger.reserveClaim({
         idempotencyKey: randomUUID(),
         scope,
         claimId: randomUUID(),
         currency: 'INR',
         amount: 10n,
       }),
-    ).rejects.toBeInstanceOf(CurrencyMismatch);
+    ).toEqual(err({ kind: 'CurrencyMismatch', currency: 'INR' }));
     expect(await rowCount(scope)).toBe(FUND_ROWS);
   });
 });
